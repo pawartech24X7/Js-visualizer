@@ -1,5 +1,5 @@
 import { clsx } from 'clsx'
-import { HTMLAttributes, forwardRef } from 'react'
+import { type HTMLAttributes, forwardRef } from 'react'
 
 interface CardProps extends HTMLAttributes<HTMLDivElement> {
   variant?: 'default' | 'elevated'

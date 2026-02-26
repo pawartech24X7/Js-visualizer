@@ -62,29 +62,29 @@ function createRuntimeValue(value: unknown): RuntimeValue {
 
 function cloneState(state: InterpreterState): InterpreterState {
   return {
-    callStack: state.callStack.map(f => ({ ...f, arguments: [...f.arguments] })),
-    executionContexts: state.executionContexts.map(ctx => ({
+    callStack: state.callStack.map((f) => ({ ...f, arguments: [...f.arguments] })),
+    executionContexts: state.executionContexts.map((ctx) => ({
       ...ctx,
       variableEnvironment: { ...ctx.variableEnvironment },
       lexicalEnvironment: { ...ctx.lexicalEnvironment },
       hoistedDeclarations: [...ctx.hoistedDeclarations],
     })),
-    memoryStack: state.memoryStack.map(s => ({ ...s, value: { ...s.value } })),
-    memoryHeap: state.memoryHeap.map(h => ({
+    memoryStack: state.memoryStack.map((s) => ({ ...s, value: { ...s.value } })),
+    memoryHeap: state.memoryHeap.map((h) => ({
       ...h,
       properties: { ...h.properties },
       arrayElements: h.arrayElements ? [...h.arrayElements] : undefined,
     })),
-    webApis: state.webApis.map(w => ({ ...w })),
-    microTaskQueue: state.microTaskQueue.map(m => ({ ...m })),
-    taskQueue: state.taskQueue.map(t => ({ ...t })),
-    promises: state.promises.map(p => ({
+    webApis: state.webApis.map((w) => ({ ...w })),
+    microTaskQueue: state.microTaskQueue.map((m) => ({ ...m })),
+    taskQueue: state.taskQueue.map((t) => ({ ...t })),
+    promises: state.promises.map((p) => ({
       ...p,
       thenHandlers: [...p.thenHandlers],
       catchHandlers: [...p.catchHandlers],
       finallyHandlers: [...p.finallyHandlers],
     })),
-    consoleOutput: state.consoleOutput.map(c => ({ ...c, args: [...c.args] })),
+    consoleOutput: state.consoleOutput.map((c) => ({ ...c, args: [...c.args] })),
     eventLoopPhase: state.eventLoopPhase,
     currentContextId: state.currentContextId,
     virtualTime: state.virtualTime,
@@ -102,7 +102,7 @@ function createStep(
 ): ExecutionStep {
   stepCounter++
   const clonedState = cloneState(state)
-  
+
   return {
     stepNumber: stepCounter,
     timestamp: Date.now(),
@@ -162,7 +162,7 @@ type AnyNode = any
 export function interpret(sourceCode: string): ExecutionStep[] {
   resetCounters()
   const steps: ExecutionStep[] = []
-  
+
   let ast: Program
   try {
     ast = acorn.parse(sourceCode, {
@@ -189,29 +189,38 @@ export function interpret(sourceCode: string): ExecutionStep[] {
       microTaskQueue: [],
       taskQueue: [],
       promises: [],
-      consoleOutput: [{
-        id: generateId('console'),
-        type: 'error',
-        args: [{ type: 'string', value: `${error instanceof Error ? error.message : 'Unknown error'}` }],
-        timestamp: Date.now(),
-        stepNumber: 1,
-      }],
+      consoleOutput: [
+        {
+          id: generateId('console'),
+          type: 'error',
+          args: [
+            {
+              type: 'string',
+              value: `${error instanceof Error ? error.message : 'Unknown error'}`,
+            },
+          ],
+          timestamp: Date.now(),
+          stepNumber: 1,
+        },
+      ],
       eventLoopPhase: 'idle',
     }
     return [errorStep]
   }
 
   const globalContext = createGlobalContext()
-  
+
   const state: InterpreterState = {
-    callStack: [{
-      id: generateId('frame'),
-      functionName: 'Global',
-      line: 1,
-      column: 0,
-      executionContextId: globalContext.id,
-      arguments: [],
-    }],
+    callStack: [
+      {
+        id: generateId('frame'),
+        functionName: 'Global',
+        line: 1,
+        column: 0,
+        executionContextId: globalContext.id,
+        arguments: [],
+      },
+    ],
     executionContexts: [globalContext],
     memoryStack: [],
     memoryHeap: [],
@@ -226,15 +235,9 @@ export function interpret(sourceCode: string): ExecutionStep[] {
   }
 
   // Initial step
-  steps.push(createStep(
-    state,
-    ast,
-    'creation',
-    'push-context',
-    'Creating Global Execution Context',
-    1,
-    0
-  ))
+  steps.push(
+    createStep(state, ast, 'creation', 'push-context', 'Creating Global Execution Context', 1, 0)
+  )
 
   // Creation phase - hoist declarations
   hoistDeclarations(ast, state, globalContext.id, steps)
@@ -250,15 +253,17 @@ export function interpret(sourceCode: string): ExecutionStep[] {
   // Final step - program complete
   state.callStack = []
   state.eventLoopPhase = 'idle'
-  steps.push(createStep(
-    state,
-    null,
-    'execution',
-    'pop-context',
-    'Program execution complete',
-    ast.body.length > 0 ? getNodeLine(ast.body[ast.body.length - 1]) : 1,
-    0
-  ))
+  steps.push(
+    createStep(
+      state,
+      null,
+      'execution',
+      'pop-context',
+      'Program execution complete',
+      ast.body.length > 0 ? getNodeLine(ast.body[ast.body.length - 1]) : 1,
+      0
+    )
+  )
 
   return steps
 }
@@ -277,14 +282,14 @@ function hoistDeclarations(
   contextId: string,
   steps: ExecutionStep[]
 ): void {
-  const context = state.executionContexts.find(c => c.id === contextId)
+  const context = state.executionContexts.find((c) => c.id === contextId)
   if (!context) return
 
   for (const node of ast.body) {
     if (node.type === 'FunctionDeclaration') {
       const funcNode = node as AnyNode
       const name = funcNode.id?.name || 'anonymous'
-      
+
       // Create heap object for function
       heapIdCounter++
       const heapId = `heap-${heapIdCounter}`
@@ -318,21 +323,23 @@ function hoistDeclarations(
         heapReferenceId: heapId,
       })
 
-      steps.push(createStep(
-        state,
-        node,
-        'creation',
-        'hoisting',
-        `Hoisting function declaration: ${name}`,
-        getNodeLine(node),
-        getNodeColumn(node)
-      ))
+      steps.push(
+        createStep(
+          state,
+          node,
+          'creation',
+          'hoisting',
+          `Hoisting function declaration: ${name}`,
+          getNodeLine(node),
+          getNodeColumn(node)
+        )
+      )
     } else if (node.type === 'VariableDeclaration') {
       const varNode = node as AnyNode
       if (varNode.kind === 'var') {
         for (const decl of varNode.declarations) {
           const name = decl.id?.name || 'unknown'
-          
+
           context.variableEnvironment[name] = {
             type: 'undefined',
             value: undefined,
@@ -347,15 +354,17 @@ function hoistDeclarations(
             value: { type: 'undefined', value: undefined },
           })
 
-          steps.push(createStep(
-            state,
-            node,
-            'creation',
-            'hoisting',
-            `Hoisting var declaration: ${name} = undefined`,
-            getNodeLine(node),
-            getNodeColumn(node)
-          ))
+          steps.push(
+            createStep(
+              state,
+              node,
+              'creation',
+              'hoisting',
+              `Hoisting var declaration: ${name} = undefined`,
+              getNodeLine(node),
+              getNodeColumn(node)
+            )
+          )
         }
       }
     }
@@ -368,72 +377,72 @@ function executeNode(
   steps: ExecutionStep[],
   sourceCode: string
 ): RuntimeValue {
-  const context = state.executionContexts.find(c => c.id === state.currentContextId)
+  const context = state.executionContexts.find((c) => c.id === state.currentContextId)
   if (!context) return { type: 'undefined', value: undefined }
 
   switch (node.type) {
     case 'VariableDeclaration':
       return executeVariableDeclaration(node, state, steps, context)
-    
+
     case 'ExpressionStatement':
       return executeNode(node.expression, state, steps, sourceCode)
-    
+
     case 'CallExpression':
       return executeCallExpression(node, state, steps, sourceCode)
-    
+
     case 'FunctionDeclaration':
       // Already hoisted, skip
       return { type: 'undefined', value: undefined }
-    
+
     case 'AssignmentExpression':
       return executeAssignment(node, state, steps, context)
-    
+
     case 'BinaryExpression':
       return evaluateBinaryExpression(node, state, steps, sourceCode)
-    
+
     case 'Literal':
       return createRuntimeValue(node.value)
-    
+
     case 'Identifier':
       return resolveIdentifier(node.name, state)
-    
+
     case 'MemberExpression':
       return evaluateMemberExpression(node, state, steps, sourceCode)
-    
+
     case 'ObjectExpression':
       return createObjectExpression(node, state, steps)
-    
+
     case 'ArrayExpression':
       return createArrayExpression(node, state, steps, sourceCode)
-    
+
     case 'FunctionExpression':
     case 'ArrowFunctionExpression':
       return createFunctionExpression(node, state, steps)
-    
+
     case 'ReturnStatement':
       if (node.argument) {
         return executeNode(node.argument, state, steps, sourceCode)
       }
       return { type: 'undefined', value: undefined }
-    
+
     case 'IfStatement':
       return executeIfStatement(node, state, steps, sourceCode)
-    
+
     case 'ForStatement':
       return executeForStatement(node, state, steps, sourceCode)
-    
+
     case 'WhileStatement':
       return executeWhileStatement(node, state, steps, sourceCode)
-    
+
     case 'BlockStatement':
       for (const stmt of node.body) {
         executeNode(stmt, state, steps, sourceCode)
       }
       return { type: 'undefined', value: undefined }
-    
+
     case 'NewExpression':
       return executeNewExpression(node, state, steps, sourceCode)
-    
+
     case 'ConditionalExpression': {
       const testVal = executeNode(node.test, state, steps, sourceCode)
       if (testVal.value) {
@@ -441,16 +450,16 @@ function executeNode(
       }
       return executeNode(node.alternate, state, steps, sourceCode)
     }
-    
+
     case 'LogicalExpression':
       return evaluateLogicalExpression(node, state, steps, sourceCode)
-    
+
     case 'UnaryExpression':
       return evaluateUnaryExpression(node, state, steps, sourceCode)
-    
+
     case 'UpdateExpression':
-      return evaluateUpdateExpression(node, state, steps, context)
-    
+      return evaluateUpdateExpression(node, state, context)
+
     default:
       return { type: 'undefined', value: undefined }
   }
@@ -463,11 +472,11 @@ function executeVariableDeclaration(
   context: ExecutionContext
 ): RuntimeValue {
   const kind = node.kind as 'var' | 'let' | 'const'
-  
+
   for (const decl of node.declarations) {
     const name = decl.id?.name || 'unknown'
     let value: RuntimeValue = { type: 'undefined', value: undefined }
-    
+
     if (decl.init) {
       value = executeNode(decl.init, state, steps, '')
     }
@@ -475,7 +484,7 @@ function executeVariableDeclaration(
     // For var, update existing hoisted declaration
     if (kind === 'var') {
       const existingSlot = state.memoryStack.find(
-        s => s.variableName === name && s.scopeId === context.id
+        (s) => s.variableName === name && s.scopeId === context.id
       )
       if (existingSlot) {
         existingSlot.value = value
@@ -497,15 +506,17 @@ function executeVariableDeclaration(
     }
 
     const valueStr = formatValue(value)
-    steps.push(createStep(
-      state,
-      node,
-      'execution',
-      'declare-variable',
-      `${kind} ${name} = ${valueStr}`,
-      getNodeLine(node),
-      getNodeColumn(node)
-    ))
+    steps.push(
+      createStep(
+        state,
+        node,
+        'execution',
+        'declare-variable',
+        `${kind} ${name} = ${valueStr}`,
+        getNodeLine(node),
+        getNodeColumn(node)
+      )
+    )
   }
 
   return { type: 'undefined', value: undefined }
@@ -521,24 +532,24 @@ function executeCallExpression(
   if (node.callee.type === 'MemberExpression') {
     const obj = node.callee.object
     const prop = node.callee.property
-    
+
     if (obj.type === 'Identifier' && obj.name === 'console') {
       return executeConsoleMethod(node, prop.name, state, steps, sourceCode)
     }
-    
+
     if (obj.type === 'Identifier' && obj.name === 'Promise') {
       return executePromiseMethod(node, prop.name, state, steps, sourceCode)
     }
   }
-  
+
   // Handle setTimeout, setInterval
   if (node.callee.type === 'Identifier') {
     const name = node.callee.name
-    
+
     if (name === 'setTimeout') {
       return executeSetTimeout(node, state, steps, sourceCode)
     }
-    
+
     if (name === 'Promise') {
       return executePromiseConstructor(node, state, steps, sourceCode)
     }
@@ -547,7 +558,7 @@ function executeCallExpression(
   // Regular function call
   const callee = node.callee
   let funcName = 'anonymous'
-  
+
   if (callee.type === 'Identifier') {
     funcName = callee.name
   } else if (callee.type === 'MemberExpression' && callee.property) {
@@ -574,31 +585,35 @@ function executeCallExpression(
   }
   state.callStack.push(frame)
 
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'call-function',
-    `Calling function: ${funcName}(${args.map(a => formatValue(a)).join(', ')})`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'call-function',
+      `Calling function: ${funcName}(${args.map((a) => formatValue(a)).join(', ')})`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   // Execute function body would go here
   // For simplicity, we just return undefined
 
   // Pop from call stack
   state.callStack.pop()
-  
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'return-function',
-    `Function ${funcName} returned`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'return-function',
+      `Function ${funcName} returned`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return { type: 'undefined', value: undefined }
 }
@@ -614,9 +629,8 @@ function executeConsoleMethod(
     executeNode(arg, state, steps, sourceCode)
   )
 
-  const consoleType = method === 'error' ? 'error' :
-                      method === 'warn' ? 'warn' :
-                      method === 'info' ? 'info' : 'log'
+  const consoleType =
+    method === 'error' ? 'error' : method === 'warn' ? 'warn' : method === 'info' ? 'info' : 'log'
 
   const entry: ConsoleEntry = {
     id: generateId('console'),
@@ -627,16 +641,18 @@ function executeConsoleMethod(
   }
   state.consoleOutput.push(entry)
 
-  const argsStr = args.map(a => formatValue(a)).join(', ')
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'console-log',
-    `console.${method}(${argsStr})`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  const argsStr = args.map((a) => formatValue(a)).join(', ')
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'console-log',
+      `console.${method}(${argsStr})`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return { type: 'undefined', value: undefined }
 }
@@ -648,14 +664,19 @@ function executeSetTimeout(
   sourceCode: string
 ): RuntimeValue {
   const callback = node.arguments[0]
-  const delay = node.arguments[1] ? executeNode(node.arguments[1], state, steps, sourceCode) : { type: 'number', value: 0 }
-  
+  const delay = node.arguments[1]
+    ? executeNode(node.arguments[1], state, steps, sourceCode)
+    : { type: 'number', value: 0 }
+
   let callbackName = 'anonymous'
   if (callback?.type === 'Identifier') {
     callbackName = callback.name
   } else if (callback?.type === 'FunctionExpression' && callback.id) {
     callbackName = callback.id.name
-  } else if (callback?.type === 'FunctionExpression' || callback?.type === 'ArrowFunctionExpression') {
+  } else if (
+    callback?.type === 'FunctionExpression' ||
+    callback?.type === 'ArrowFunctionExpression'
+  ) {
     callbackName = 'callback'
   }
 
@@ -673,15 +694,17 @@ function executeSetTimeout(
   }
   state.webApis.push(task)
 
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'schedule-timeout',
-    `setTimeout(${callbackName}, ${delay.value}ms) → Web API`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'schedule-timeout',
+      `setTimeout(${callbackName}, ${delay.value}ms) → Web API`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return { type: 'number', value: taskIdCounter }
 }
@@ -694,7 +717,7 @@ function executePromiseConstructor(
 ): RuntimeValue {
   taskIdCounter++
   const promiseId = `promise-${taskIdCounter}`
-  
+
   const promise: PromiseState = {
     id: promiseId,
     label: `Promise #${taskIdCounter}`,
@@ -720,30 +743,34 @@ function executePromiseConstructor(
   }
   state.memoryHeap.push(promiseHeap)
 
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'create-promise',
-    `new Promise() created (pending)`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'create-promise',
+      `new Promise() created (pending)`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   // Simulate immediate resolution for demo purposes
   promise.status = 'fulfilled'
   promise.value = { type: 'string', value: 'resolved' }
   promise.resolvedAtStep = stepCounter + 1
 
-  steps.push(createStep(
-    state,
-    node,
-    'async',
-    'resolve-promise',
-    `Promise resolved`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'async',
+      'resolve-promise',
+      `Promise resolved`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return { type: 'object', value: 'Promise', heapId }
 }
@@ -756,13 +783,13 @@ function executePromiseMethod(
   sourceCode: string
 ): RuntimeValue {
   if (method === 'resolve') {
-    const value = node.arguments[0] 
+    const value: RuntimeValue = node.arguments[0]
       ? executeNode(node.arguments[0], state, steps, sourceCode)
       : { type: 'undefined', value: undefined }
 
     taskIdCounter++
     const promiseId = `promise-${taskIdCounter}`
-    
+
     const promise: PromiseState = {
       id: promiseId,
       label: `Promise.resolve`,
@@ -776,15 +803,31 @@ function executePromiseMethod(
     }
     state.promises.push(promise)
 
-    steps.push(createStep(
-      state,
-      node,
-      'execution',
-      'create-promise',
-      `Promise.resolve(${formatValue(value)})`,
-      getNodeLine(node),
-      getNodeColumn(node)
-    ))
+    steps.push(
+      createStep(
+        state,
+        node,
+        'execution',
+        'create-promise',
+        `Promise.resolve(${formatValue(value)})`,
+        getNodeLine(node),
+        getNodeColumn(node)
+      )
+    )
+
+    heapIdCounter++
+    const heapId = `heap-${heapIdCounter}`
+    const promiseHeap: HeapObject = {
+      id: heapId,
+      type: 'object',
+      properties: {
+        '[[PromiseState]]': { type: 'string', value: 'fulfilled' } as RuntimeValue,
+        '[[PromiseResult]]': value,
+      },
+      referenceCount: 1,
+      createdAtStep: stepCounter,
+    }
+    state.memoryHeap.push(promiseHeap)
 
     return { type: 'object', value: 'Promise' }
   }
@@ -809,22 +852,24 @@ function executeAssignment(
   }
 
   // Update memory slot
-  const slot = state.memoryStack.find(s => s.variableName === name)
+  const slot = state.memoryStack.find((s) => s.variableName === name)
   if (slot) {
     slot.value = value
     slot.type = value.heapId ? 'reference' : 'primitive'
     slot.heapReferenceId = value.heapId
   }
 
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'assign-variable',
-    `${name} = ${formatValue(value)}`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'assign-variable',
+      `${name} = ${formatValue(value)}`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return value
 }
@@ -837,30 +882,56 @@ function evaluateBinaryExpression(
 ): RuntimeValue {
   const left = executeNode(node.left, state, steps, sourceCode)
   const right = executeNode(node.right, state, steps, sourceCode)
-  
+
   const leftVal = left.value as number
   const rightVal = right.value as number
 
   let result: unknown
   switch (node.operator) {
     case '+':
-      result = typeof leftVal === 'string' || typeof rightVal === 'string'
-        ? String(leftVal) + String(rightVal)
-        : leftVal + rightVal
+      result =
+        typeof leftVal === 'string' || typeof rightVal === 'string'
+          ? String(leftVal) + String(rightVal)
+          : leftVal + rightVal
       break
-    case '-': result = leftVal - rightVal; break
-    case '*': result = leftVal * rightVal; break
-    case '/': result = leftVal / rightVal; break
-    case '%': result = leftVal % rightVal; break
-    case '===': result = leftVal === rightVal; break
-    case '!==': result = leftVal !== rightVal; break
-    case '==': result = leftVal == rightVal; break
-    case '!=': result = leftVal != rightVal; break
-    case '<': result = leftVal < rightVal; break
-    case '>': result = leftVal > rightVal; break
-    case '<=': result = leftVal <= rightVal; break
-    case '>=': result = leftVal >= rightVal; break
-    default: result = undefined
+    case '-':
+      result = leftVal - rightVal
+      break
+    case '*':
+      result = leftVal * rightVal
+      break
+    case '/':
+      result = leftVal / rightVal
+      break
+    case '%':
+      result = leftVal % rightVal
+      break
+    case '===':
+      result = leftVal === rightVal
+      break
+    case '!==':
+      result = leftVal !== rightVal
+      break
+    case '==':
+      result = leftVal == rightVal
+      break
+    case '!=':
+      result = leftVal != rightVal
+      break
+    case '<':
+      result = leftVal < rightVal
+      break
+    case '>':
+      result = leftVal > rightVal
+      break
+    case '<=':
+      result = leftVal <= rightVal
+      break
+    case '>=':
+      result = leftVal >= rightVal
+      break
+    default:
+      result = undefined
   }
 
   return createRuntimeValue(result)
@@ -873,17 +944,17 @@ function evaluateLogicalExpression(
   sourceCode: string
 ): RuntimeValue {
   const left = executeNode(node.left, state, steps, sourceCode)
-  
+
   if (node.operator === '&&') {
     if (!left.value) return left
     return executeNode(node.right, state, steps, sourceCode)
   }
-  
+
   if (node.operator === '||') {
     if (left.value) return left
     return executeNode(node.right, state, steps, sourceCode)
   }
-  
+
   if (node.operator === '??') {
     if (left.value !== null && left.value !== undefined) return left
     return executeNode(node.right, state, steps, sourceCode)
@@ -899,20 +970,24 @@ function evaluateUnaryExpression(
   sourceCode: string
 ): RuntimeValue {
   const arg = executeNode(node.argument, state, steps, sourceCode)
-  
+
   switch (node.operator) {
-    case '!': return { type: 'boolean', value: !arg.value }
-    case '-': return { type: 'number', value: -(arg.value as number) }
-    case '+': return { type: 'number', value: +(arg.value as number) }
-    case 'typeof': return { type: 'string', value: typeof arg.value }
-    default: return { type: 'undefined', value: undefined }
+    case '!':
+      return { type: 'boolean', value: !arg.value }
+    case '-':
+      return { type: 'number', value: -(arg.value as number) }
+    case '+':
+      return { type: 'number', value: +(arg.value as number) }
+    case 'typeof':
+      return { type: 'string', value: typeof arg.value }
+    default:
+      return { type: 'undefined', value: undefined }
   }
 }
 
 function evaluateUpdateExpression(
   node: AnyNode,
   state: InterpreterState,
-  steps: ExecutionStep[],
   context: ExecutionContext
 ): RuntimeValue {
   const name = node.argument?.name
@@ -920,7 +995,7 @@ function evaluateUpdateExpression(
 
   const current = resolveIdentifier(name, state)
   const currentVal = current.value as number
-  
+
   let newVal: number
   if (node.operator === '++') {
     newVal = currentVal + 1
@@ -935,14 +1010,12 @@ function evaluateUpdateExpression(
     context.lexicalEnvironment[name] = { type: 'number', value: newVal }
   }
 
-  const slot = state.memoryStack.find(s => s.variableName === name)
+  const slot = state.memoryStack.find((s) => s.variableName === name)
   if (slot) {
     slot.value = { type: 'number', value: newVal }
   }
 
-  return node.prefix
-    ? { type: 'number', value: newVal }
-    : { type: 'number', value: currentVal }
+  return node.prefix ? { type: 'number', value: newVal } : { type: 'number', value: currentVal }
 }
 
 function resolveIdentifier(name: string, state: InterpreterState): RuntimeValue {
@@ -971,7 +1044,7 @@ function evaluateMemberExpression(
     : { type: 'string', value: node.property.name }
 
   if (obj.heapId) {
-    const heapObj = state.memoryHeap.find(h => h.id === obj.heapId)
+    const heapObj = state.memoryHeap.find((h) => h.id === obj.heapId)
     if (heapObj) {
       const key = String(prop.value)
       if (heapObj.type === 'array' && heapObj.arrayElements) {
@@ -996,7 +1069,7 @@ function createObjectExpression(
 ): RuntimeValue {
   heapIdCounter++
   const heapId = `heap-${heapIdCounter}`
-  
+
   const properties: Record<string, RuntimeValue> = {}
   for (const prop of node.properties) {
     const key = prop.key.name || prop.key.value
@@ -1013,15 +1086,17 @@ function createObjectExpression(
   }
   state.memoryHeap.push(heapObj)
 
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'create-object',
-    `Creating object with ${Object.keys(properties).length} properties`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'create-object',
+      `Creating object with ${Object.keys(properties).length} properties`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return { type: 'object', value: '{...}', heapId }
 }
@@ -1034,7 +1109,7 @@ function createArrayExpression(
 ): RuntimeValue {
   heapIdCounter++
   const heapId = `heap-${heapIdCounter}`
-  
+
   const elements: RuntimeValue[] = node.elements.map((el: AnyNode) =>
     el ? executeNode(el, state, steps, sourceCode) : { type: 'undefined', value: undefined }
   )
@@ -1049,15 +1124,17 @@ function createArrayExpression(
   }
   state.memoryHeap.push(heapObj)
 
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'create-array',
-    `Creating array with ${elements.length} elements`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'create-array',
+      `Creating array with ${elements.length} elements`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return { type: 'array', value: `[${elements.length} items]`, heapId }
 }
@@ -1069,7 +1146,7 @@ function createFunctionExpression(
 ): RuntimeValue {
   heapIdCounter++
   const heapId = `heap-${heapIdCounter}`
-  
+
   const name = node.id?.name || 'anonymous'
   const params = node.params?.map((p: AnyNode) => p.name) || []
 
@@ -1085,15 +1162,17 @@ function createFunctionExpression(
   }
   state.memoryHeap.push(heapObj)
 
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'create-function',
-    `Creating function: ${name}(${params.join(', ')})`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'create-function',
+      `Creating function: ${name}(${params.join(', ')})`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return { type: 'function', value: name, heapId }
 }
@@ -1105,16 +1184,18 @@ function executeIfStatement(
   sourceCode: string
 ): RuntimeValue {
   const test = executeNode(node.test, state, steps, sourceCode)
-  
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'expression-eval',
-    `if (${formatValue(test)}) → ${test.value ? 'true' : 'false'}`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'expression-eval',
+      `if (${formatValue(test)}) → ${test.value ? 'true' : 'false'}`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   if (test.value) {
     executeNode(node.consequent, state, steps, sourceCode)
@@ -1148,7 +1229,7 @@ function executeForStatement(
 
     // Execute body
     executeNode(node.body, state, steps, sourceCode)
-    
+
     // Update
     if (node.update) {
       executeNode(node.update, state, steps, sourceCode)
@@ -1172,7 +1253,7 @@ function executeWhileStatement(
   while (iterations < maxIterations) {
     const test = executeNode(node.test, state, steps, sourceCode)
     if (!test.value) break
-    
+
     executeNode(node.body, state, steps, sourceCode)
     iterations++
   }
@@ -1187,7 +1268,7 @@ function executeNewExpression(
   sourceCode: string
 ): RuntimeValue {
   const calleeName = node.callee.name || 'Object'
-  
+
   if (calleeName === 'Promise') {
     return executePromiseConstructor(node, state, steps, sourceCode)
   }
@@ -1195,7 +1276,7 @@ function executeNewExpression(
   // Generic object creation
   heapIdCounter++
   const heapId = `heap-${heapIdCounter}`
-  
+
   const heapObj: HeapObject = {
     id: heapId,
     type: 'object',
@@ -1205,15 +1286,17 @@ function executeNewExpression(
   }
   state.memoryHeap.push(heapObj)
 
-  steps.push(createStep(
-    state,
-    node,
-    'execution',
-    'create-object',
-    `new ${calleeName}()`,
-    getNodeLine(node),
-    getNodeColumn(node)
-  ))
+  steps.push(
+    createStep(
+      state,
+      node,
+      'execution',
+      'create-object',
+      `new ${calleeName}()`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
 
   return { type: 'object', value: calleeName, heapId }
 }
@@ -1224,7 +1307,7 @@ function processEventLoop(state: InterpreterState, steps: ExecutionStep[]): void
 
   while (iterations < maxIterations) {
     // Check if there are any pending tasks
-    const hasWebApis = state.webApis.some(w => w.status === 'pending')
+    const hasWebApis = state.webApis.some((w) => w.status === 'pending')
     const hasMicrotasks = state.microTaskQueue.length > 0
     const hasMacrotasks = state.taskQueue.length > 0
 
@@ -1235,7 +1318,7 @@ function processEventLoop(state: InterpreterState, steps: ExecutionStep[]): void
       if (webApi.status === 'pending') {
         webApi.remainingTime = 0
         webApi.status = 'ready'
-        
+
         const macroTask: MacroTask = {
           id: generateId('task'),
           type: 'setTimeout',
@@ -1246,15 +1329,17 @@ function processEventLoop(state: InterpreterState, steps: ExecutionStep[]): void
         state.taskQueue.push(macroTask)
 
         state.eventLoopPhase = 'checking-macrotasks'
-        steps.push(createStep(
-          state,
-          null,
-          'async',
-          'enqueue-macrotask',
-          `setTimeout callback "${webApi.callbackName}" moved to Task Queue`,
-          1,
-          0
-        ))
+        steps.push(
+          createStep(
+            state,
+            null,
+            'async',
+            'enqueue-macrotask',
+            `setTimeout callback "${webApi.callbackName}" moved to Task Queue`,
+            1,
+            0
+          )
+        )
       }
     }
 
@@ -1263,35 +1348,39 @@ function processEventLoop(state: InterpreterState, steps: ExecutionStep[]): void
     while (state.microTaskQueue.length > 0) {
       const microtask = state.microTaskQueue.shift()!
       state.eventLoopPhase = 'executing-microtask'
-      
-      steps.push(createStep(
-        state,
-        null,
-        'async',
-        'dequeue-microtask',
-        `Executing microtask: ${microtask.callbackName}`,
-        1,
-        0
-      ))
+
+      steps.push(
+        createStep(
+          state,
+          null,
+          'async',
+          'dequeue-microtask',
+          `Executing microtask: ${microtask.callbackName}`,
+          1,
+          0
+        )
+      )
     }
 
     // Process one macrotask
     if (state.taskQueue.length > 0) {
       state.eventLoopPhase = 'executing-macrotask'
       const macrotask = state.taskQueue.shift()!
-      
-      steps.push(createStep(
-        state,
-        null,
-        'async',
-        'dequeue-macrotask',
-        `Executing macrotask: ${macrotask.callbackName}`,
-        1,
-        0
-      ))
+
+      steps.push(
+        createStep(
+          state,
+          null,
+          'async',
+          'dequeue-macrotask',
+          `Executing macrotask: ${macrotask.callbackName}`,
+          1,
+          0
+        )
+      )
 
       // Mark web API as completed
-      const webApi = state.webApis.find(w => w.id === macrotask.webApiTaskId)
+      const webApi = state.webApis.find((w) => w.id === macrotask.webApiTaskId)
       if (webApi) {
         webApi.status = 'completed'
       }
