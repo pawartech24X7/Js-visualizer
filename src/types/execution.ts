@@ -59,10 +59,20 @@ export interface ExecutionContext {
 }
 
 export interface RuntimeValue {
-  type: 'undefined' | 'null' | 'boolean' | 'number' | 'string' | 'object' | 'array' | 'function' | 'reference'
+  type:
+    | 'undefined'
+    | 'null'
+    | 'boolean'
+    | 'number'
+    | 'string'
+    | 'object'
+    | 'array'
+    | 'function'
+    | 'reference'
   value: unknown
   heapId?: string
   label?: string
+  isReturn?: boolean // New property to signal return from function
 }
 
 export interface MemorySlot {
@@ -82,6 +92,8 @@ export interface HeapObject {
   functionName?: string
   functionParams?: string[]
   functionBody?: string
+  functionAst?: any // Add this to store function node for execution
+  closureContextId?: string | null // Reference to parent scope
   referenceCount: number
   createdAtStep: number
 }

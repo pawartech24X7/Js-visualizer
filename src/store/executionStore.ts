@@ -24,6 +24,7 @@ interface ExecutionState {
   setIsExecuting: (isExecuting: boolean) => void
   setError: (error: ExecutionError | null) => void
   getCurrentStep: () => ExecutionStep | null
+  clearConsole: () => void
 }
 
 const DEFAULT_CODE = `// JavaScript Visualizer - Try these examples!
@@ -139,5 +140,18 @@ export const useExecutionStore = create<ExecutionState>((set, get) => ({
     return currentStepIndex >= 0 && currentStepIndex < executionSteps.length 
       ? executionSteps[currentStepIndex] 
       : null
+  },
+
+  clearConsole: () => {
+    const { executionSteps, currentStepIndex } = get()
+    if (executionSteps.length === 0) return
+
+    const newSteps = executionSteps.map((step, idx) => {
+      if (idx <= currentStepIndex) {
+        return { ...step, consoleOutput: [] }
+      }
+      return step
+    })
+    set({ executionSteps: newSteps })
   },
 }))

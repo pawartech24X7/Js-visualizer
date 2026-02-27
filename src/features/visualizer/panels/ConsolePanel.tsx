@@ -5,7 +5,7 @@ import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui'
 import { Button } from '@/components/ui'
 
 export function ConsolePanel() {
-  const { executionSteps, currentStepIndex } = useExecutionStore()
+  const { executionSteps, currentStepIndex, clearConsole } = useExecutionStore()
   
   const currentStep = currentStepIndex >= 0 && currentStepIndex < executionSteps.length
     ? executionSteps[currentStepIndex]
@@ -33,16 +33,22 @@ export function ConsolePanel() {
 
   return (
     <Card className="h-full flex flex-col">
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="flex items-center gap-2">
           <Terminal className="w-4 h-4 text-[var(--color-text-muted)]" />
           Console
         </CardTitle>
-        <Button variant="ghost" size="sm" className="text-[var(--color-text-muted)]">
-          <Trash2 className="w-3 h-3" />
+        <Button 
+          variant="ghost" 
+          size="sm" 
+          className="text-[var(--color-text-muted)] hover:text-[var(--color-accent-red)]"
+          onClick={clearConsole}
+          title="Clear Console"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
         </Button>
       </CardHeader>
-      <CardContent className="flex-1 overflow-auto font-mono text-sm bg-[var(--color-bg-primary)] rounded-lg">
+      <CardContent className="flex-1 overflow-auto font-mono text-sm bg-[var(--color-bg-primary)] rounded-lg m-2 mt-0">
         {consoleOutput.length === 0 ? (
           <div className="text-[var(--color-text-muted)] text-center py-4">
             Console output will appear here

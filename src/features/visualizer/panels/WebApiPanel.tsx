@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
+import { Info } from 'lucide-react'
 import { useExecutionStore } from '@/store'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui'
+import { Card, CardHeader, CardTitle, CardContent, Tooltip } from '@/components/ui'
 
 export function WebApiPanel() {
   const { executionSteps, currentStepIndex } = useExecutionStore()
@@ -13,16 +14,21 @@ export function WebApiPanel() {
 
   return (
     <Card className="h-full flex flex-col">
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-[var(--color-accent-orange)]" />
           Web APIs
         </CardTitle>
-        <span className="text-xs text-[var(--color-text-muted)]">
-          {webApis.length} active
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[var(--color-text-muted)]">
+            {webApis.length} active
+          </span>
+          <Tooltip content="Web APIs are features provided by the browser (like setTimeout or fetch) that run outside the main JS engine.">
+            <Info className="w-3.5 h-3.5 text-[var(--color-text-muted)] cursor-help" />
+          </Tooltip>
+        </div>
       </CardHeader>
-      <CardContent className="flex-1 overflow-auto">
+      <CardContent className="flex-1 overflow-auto pt-2">
         {webApis.length === 0 ? (
           <div className="text-sm text-[var(--color-text-muted)] text-center py-4">
             No active Web APIs

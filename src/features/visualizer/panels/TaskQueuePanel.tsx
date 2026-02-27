@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
+import { Info } from 'lucide-react'
 import { useExecutionStore } from '@/store'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui'
+import { Card, CardHeader, CardTitle, CardContent, Tooltip } from '@/components/ui'
 
 export function TaskQueuePanel() {
   const { executionSteps, currentStepIndex } = useExecutionStore()
@@ -14,16 +15,21 @@ export function TaskQueuePanel() {
 
   return (
     <Card className="h-full flex flex-col">
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-[var(--color-queue-macro)]" />
           Task Queue
         </CardTitle>
-        <span className="text-xs text-[var(--color-text-muted)]">
-          {tasks.length} pending
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[var(--color-text-muted)]">
+            {tasks.length} pending
+          </span>
+          <Tooltip content="Task Queue (Macrotask Queue): Stores callbacks from setTimeout, setInterval, and I/O. These run one by one after the microtask queue is empty.">
+            <Info className="w-3.5 h-3.5 text-[var(--color-text-muted)] cursor-help" />
+          </Tooltip>
+        </div>
       </CardHeader>
-      <CardContent className="flex-1 overflow-auto">
+      <CardContent className="flex-1 overflow-auto pt-2">
         {tasks.length === 0 ? (
           <div className="text-sm text-[var(--color-text-muted)] text-center py-4">
             Queue is empty

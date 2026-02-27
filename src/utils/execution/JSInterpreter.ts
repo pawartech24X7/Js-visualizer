@@ -74,6 +74,7 @@ function cloneState(state: InterpreterState): InterpreterState {
       ...h,
       properties: { ...h.properties },
       arrayElements: h.arrayElements ? [...h.arrayElements] : undefined,
+      functionParams: h.functionParams ? [...h.functionParams] : undefined,
     })),
     webApis: state.webApis.map((w) => ({ ...w })),
     microTaskQueue: state.microTaskQueue.map((m) => ({ ...m })),
@@ -277,15 +278,17 @@ function getNodeColumn(node: AnyNode): number {
 }
 
 function hoistDeclarations(
-  ast: Program,
+  bodyNode: AnyNode,
   state: InterpreterState,
   contextId: string,
   steps: ExecutionStep[]
 ): void {
   const context = state.executionContexts.find((c) => c.id === contextId)
-  if (!context) return
+  if (!context || !bodyNode.body) return
 
-  for (const node of ast.body) {
+  const nodes = Array.isArray(bodyNode.body) ? bodyNode.body : [bodyNode.body]
+
+  for (const node of nodes) {
     if (node.type === 'FunctionDeclaration') {
       const funcNode = node as AnyNode
       const name = funcNode.id?.name || 'anonymous'
@@ -300,6 +303,8 @@ function hoistDeclarations(
         functionName: name,
         functionParams: funcNode.params?.map((p: AnyNode) => p.name) || [],
         functionBody: 'function body',
+        functionAst: funcNode.body,
+        closureContextId: contextId,
         referenceCount: 1,
         createdAtStep: stepCounter,
       }
@@ -421,12 +426,15 @@ function executeNode(
 
     case 'ReturnStatement':
       if (node.argument) {
-        return executeNode(node.argument, state, steps, sourceCode)
+        const result = executeNode(node.argument, state, steps, sourceCode)
+        return { ...result, isReturn: true }
       }
-      return { type: 'undefined', value: undefined }
+      return { type: 'undefined', value: undefined, isReturn: true }
 
-    case 'IfStatement':
-      return executeIfStatement(node, state, steps, sourceCode)
+    case 'IfStatement': {
+      const result = executeIfStatement(node, state, steps, sourceCode)
+      return result
+    }
 
     case 'ForStatement':
       return executeForStatement(node, state, steps, sourceCode)
@@ -434,11 +442,14 @@ function executeNode(
     case 'WhileStatement':
       return executeWhileStatement(node, state, steps, sourceCode)
 
-    case 'BlockStatement':
+    case 'BlockStatement': {
+      let lastVal: RuntimeValue = { type: 'undefined', value: undefined }
       for (const stmt of node.body) {
-        executeNode(stmt, state, steps, sourceCode)
+        lastVal = executeNode(stmt, state, steps, sourceCode)
+        if (lastVal.isReturn) return lastVal
       }
-      return { type: 'undefined', value: undefined }
+      return lastVal
+    }
 
     case 'NewExpression':
       return executeNewExpression(node, state, steps, sourceCode)
@@ -556,13 +567,18 @@ function executeCallExpression(
   }
 
   // Regular function call
-  const callee = node.callee
+  const calleeNode = node.callee
   let funcName = 'anonymous'
+  let funcValue: RuntimeValue = { type: 'undefined', value: undefined }
 
-  if (callee.type === 'Identifier') {
-    funcName = callee.name
-  } else if (callee.type === 'MemberExpression' && callee.property) {
-    funcName = callee.property.name || 'method'
+  if (calleeNode.type === 'Identifier') {
+    funcName = calleeNode.name
+    funcValue = resolveIdentifier(funcName, state)
+  } else if (calleeNode.type === 'MemberExpression') {
+    funcName = calleeNode.property.name || 'method'
+    funcValue = evaluateMemberExpression(calleeNode, state, steps, sourceCode)
+  } else {
+    funcValue = executeNode(calleeNode, state, steps, sourceCode)
   }
 
   // Evaluate arguments
@@ -570,21 +586,95 @@ function executeCallExpression(
     executeNode(arg, state, steps, sourceCode)
   )
 
-  // Create new execution context for function
-  const newContext = createFunctionContext(funcName, state.currentContextId)
-  state.executionContexts.push(newContext)
+  if (funcValue.type === 'function' && funcValue.heapId) {
+    const heapObj = state.memoryHeap.find((h) => h.id === funcValue.heapId)
+    if (heapObj && heapObj.functionAst) {
+      // Create new execution context for function
+      const outerEnv = heapObj.closureContextId || state.currentContextId
+      const newContext = createFunctionContext(funcName, outerEnv)
+      state.executionContexts.push(newContext)
 
-  // Push to call stack
-  const frame: StackFrame = {
-    id: generateId('frame'),
-    functionName: funcName,
-    line: getNodeLine(node),
-    column: getNodeColumn(node),
-    executionContextId: newContext.id,
-    arguments: args,
+      // Map parameters to arguments
+      if (heapObj.functionParams) {
+        heapObj.functionParams.forEach((paramName, index) => {
+          const val = args[index] || { type: 'undefined', value: undefined }
+          newContext.lexicalEnvironment[paramName] = val
+          state.memoryStack.push({
+            id: generateId('mem'),
+            variableName: paramName,
+            scopeId: newContext.id,
+            type: val.heapId ? 'reference' : 'primitive',
+            value: val,
+            heapReferenceId: val.heapId,
+          })
+        })
+      }
+
+      // Push to call stack
+      const frame: StackFrame = {
+        id: generateId('frame'),
+        functionName: funcName,
+        line: getNodeLine(node),
+        column: getNodeColumn(node),
+        executionContextId: newContext.id,
+        arguments: args,
+      }
+      state.callStack.push(frame)
+
+      const prevContextId = state.currentContextId
+      state.currentContextId = newContext.id
+
+      // Hoist declarations inside function
+      hoistDeclarations(heapObj.functionAst, state, newContext.id, steps)
+
+      steps.push(
+        createStep(
+          state,
+          node,
+          'execution',
+          'call-function',
+          `Calling function: ${funcName}(${args.map((a) => formatValue(a)).join(', ')})`,
+          getNodeLine(node),
+          getNodeColumn(node)
+        )
+      )
+
+      // Execute function body
+      let result: RuntimeValue
+      if (heapObj.functionAst.type === 'BlockStatement') {
+        result = executeNode(heapObj.functionAst, state, steps, sourceCode)
+      } else {
+        // Arrow function with expression body - wrap result as if it was returned
+        result = executeNode(heapObj.functionAst, state, steps, sourceCode)
+        result = { ...result, isReturn: true }
+      }
+
+      // If it was a return, unwrap it
+      if (result.isReturn) {
+        result = { ...result, isReturn: false }
+      }
+
+      // Pop from call stack and restore context
+      state.callStack.pop()
+      state.currentContextId = prevContextId
+
+      steps.push(
+        createStep(
+          state,
+          node,
+          'execution',
+          'return-function',
+          `Function ${funcName} returned ${formatValue(result)}`,
+          getNodeLine(node),
+          getNodeColumn(node)
+        )
+      )
+
+      return result
+    }
   }
-  state.callStack.push(frame)
 
+  // Fallback for native/unknown functions
   steps.push(
     createStep(
       state,
@@ -592,24 +682,6 @@ function executeCallExpression(
       'execution',
       'call-function',
       `Calling function: ${funcName}(${args.map((a) => formatValue(a)).join(', ')})`,
-      getNodeLine(node),
-      getNodeColumn(node)
-    )
-  )
-
-  // Execute function body would go here
-  // For simplicity, we just return undefined
-
-  // Pop from call stack
-  state.callStack.pop()
-
-  steps.push(
-    createStep(
-      state,
-      node,
-      'execution',
-      'return-function',
-      `Function ${funcName} returned`,
       getNodeLine(node),
       getNodeColumn(node)
     )
@@ -839,24 +911,55 @@ function executeAssignment(
   node: AnyNode,
   state: InterpreterState,
   steps: ExecutionStep[],
-  context: ExecutionContext
+  _context: ExecutionContext
 ): RuntimeValue {
   const name = node.left?.name || 'unknown'
   const value = executeNode(node.right, state, steps, '')
 
-  // Update in environment
-  if (name in context.variableEnvironment) {
-    context.variableEnvironment[name] = value
-  } else if (name in context.lexicalEnvironment) {
-    context.lexicalEnvironment[name] = value
+  // Update in environment - search up closure chain
+  let currentContextId: string | null = state.currentContextId
+  let found = false
+
+  while (currentContextId) {
+    const ctx = state.executionContexts.find((c) => c.id === currentContextId)
+    if (!ctx) break
+
+    if (name in ctx.lexicalEnvironment) {
+      ctx.lexicalEnvironment[name] = value
+      found = true
+      break
+    }
+    if (name in ctx.variableEnvironment) {
+      ctx.variableEnvironment[name] = value
+      found = true
+      break
+    }
+
+    currentContextId = ctx.outerEnvironmentRef
+  }
+
+  // If not found in closure chain, it might be a new global variable (simplified)
+  if (!found) {
+    const globalCtx = state.executionContexts.find((c) => c.type === 'global')
+    if (globalCtx) {
+      globalCtx.variableEnvironment[name] = value
+    }
   }
 
   // Update memory slot
-  const slot = state.memoryStack.find((s) => s.variableName === name)
-  if (slot) {
-    slot.value = value
-    slot.type = value.heapId ? 'reference' : 'primitive'
-    slot.heapReferenceId = value.heapId
+  let searchContextId: string | null = state.currentContextId
+  while (searchContextId) {
+    const slot = state.memoryStack.find(
+      (s) => s.variableName === name && s.scopeId === searchContextId
+    )
+    if (slot) {
+      slot.value = value
+      slot.type = value.heapId ? 'reference' : 'primitive'
+      slot.heapReferenceId = value.heapId
+      break
+    }
+    const ctx = state.executionContexts.find((c) => c.id === searchContextId)
+    searchContextId = ctx?.outerEnvironmentRef || null
   }
 
   steps.push(
@@ -988,7 +1091,7 @@ function evaluateUnaryExpression(
 function evaluateUpdateExpression(
   node: AnyNode,
   state: InterpreterState,
-  context: ExecutionContext
+  _context: ExecutionContext
 ): RuntimeValue {
   const name = node.argument?.name
   if (!name) return { type: 'undefined', value: undefined }
@@ -1003,16 +1106,35 @@ function evaluateUpdateExpression(
     newVal = currentVal - 1
   }
 
-  // Update value
-  if (name in context.variableEnvironment) {
-    context.variableEnvironment[name] = { type: 'number', value: newVal }
-  } else if (name in context.lexicalEnvironment) {
-    context.lexicalEnvironment[name] = { type: 'number', value: newVal }
+  // Update value - search up closure chain
+  let currentContextId: string | null = state.currentContextId
+  while (currentContextId) {
+    const ctx = state.executionContexts.find((c) => c.id === currentContextId)
+    if (!ctx) break
+
+    if (name in ctx.lexicalEnvironment) {
+      ctx.lexicalEnvironment[name] = { type: 'number', value: newVal }
+      break
+    }
+    if (name in ctx.variableEnvironment) {
+      ctx.variableEnvironment[name] = { type: 'number', value: newVal }
+      break
+    }
+    currentContextId = ctx.outerEnvironmentRef
   }
 
-  const slot = state.memoryStack.find((s) => s.variableName === name)
-  if (slot) {
-    slot.value = { type: 'number', value: newVal }
+  // Update memory stack slot
+  let searchContextId: string | null = state.currentContextId
+  while (searchContextId) {
+    const slot = state.memoryStack.find(
+      (s) => s.variableName === name && s.scopeId === searchContextId
+    )
+    if (slot) {
+      slot.value = { type: 'number', value: newVal }
+      break
+    }
+    const ctx = state.executionContexts.find((c) => c.id === searchContextId)
+    searchContextId = ctx?.outerEnvironmentRef || null
   }
 
   return node.prefix ? { type: 'number', value: newVal } : { type: 'number', value: currentVal }
@@ -1020,15 +1142,22 @@ function evaluateUpdateExpression(
 
 function resolveIdentifier(name: string, state: InterpreterState): RuntimeValue {
   // Search from current context up through scope chain
-  for (let i = state.executionContexts.length - 1; i >= 0; i--) {
-    const ctx = state.executionContexts[i]
+  let currentContextId: string | null = state.currentContextId
+
+  while (currentContextId) {
+    const ctx = state.executionContexts.find((c) => c.id === currentContextId)
+    if (!ctx) break
+
     if (name in ctx.lexicalEnvironment) {
       return ctx.lexicalEnvironment[name]
     }
     if (name in ctx.variableEnvironment) {
       return ctx.variableEnvironment[name]
     }
+
+    currentContextId = ctx.outerEnvironmentRef
   }
+
   return { type: 'undefined', value: undefined }
 }
 
@@ -1157,6 +1286,8 @@ function createFunctionExpression(
     functionName: name,
     functionParams: params,
     functionBody: 'function body',
+    functionAst: node.body,
+    closureContextId: state.currentContextId,
     referenceCount: 1,
     createdAtStep: stepCounter + 1,
   }
@@ -1198,9 +1329,9 @@ function executeIfStatement(
   )
 
   if (test.value) {
-    executeNode(node.consequent, state, steps, sourceCode)
+    return executeNode(node.consequent, state, steps, sourceCode)
   } else if (node.alternate) {
-    executeNode(node.alternate, state, steps, sourceCode)
+    return executeNode(node.alternate, state, steps, sourceCode)
   }
 
   return { type: 'undefined', value: undefined }

@@ -30,7 +30,7 @@ export function AppLayout({ children, header, sidebar }: AppLayoutProps) {
         </motion.aside>
 
         {/* Main Content */}
-        <main className="flex-1 overflow-auto">
+        <main className="flex-1 overflow-hidden">
           {children}
         </main>
       </div>

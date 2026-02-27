@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
+import { Info } from 'lucide-react'
 import { useExecutionStore } from '@/store'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui'
+import { Card, CardHeader, CardTitle, CardContent, Tooltip } from '@/components/ui'
 import type { MemorySlot, HeapObject, RuntimeValue } from '@/types'
 
 export function MemoryPanel() {
@@ -15,19 +16,27 @@ export function MemoryPanel() {
 
   return (
     <Card className="h-full flex flex-col">
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-[var(--color-accent-green)]" />
           Memory
         </CardTitle>
+        <Tooltip content="Memory is where data is stored. The Stack is for primitive values and context data; the Heap is for large objects and functions.">
+          <Info className="w-3.5 h-3.5 text-[var(--color-text-muted)] cursor-help" />
+        </Tooltip>
       </CardHeader>
-      <CardContent className="flex-1 overflow-auto">
+      <CardContent className="flex-1 overflow-auto pt-2">
         <div className="grid grid-cols-2 gap-4 h-full">
           {/* Stack */}
           <div>
-            <div className="text-xs font-semibold text-[var(--color-stack)] mb-2 flex items-center gap-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-[var(--color-stack)]" />
-              STACK
+            <div className="text-xs font-semibold text-[var(--color-stack)] mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-[var(--color-stack)]" />
+                STACK
+              </div>
+              <Tooltip content="Stack: A small, fast memory region that stores primitive values (like numbers/strings) and function call frames.">
+                <Info className="w-3 h-3 cursor-help text-[var(--color-text-muted)]" />
+              </Tooltip>
             </div>
             <div className="space-y-1">
               <AnimatePresence>
@@ -46,9 +55,14 @@ export function MemoryPanel() {
 
           {/* Heap */}
           <div>
-            <div className="text-xs font-semibold text-[var(--color-heap)] mb-2 flex items-center gap-2">
-              <div className="w-1.5 h-1.5 rounded-full bg-[var(--color-heap)]" />
-              HEAP
+            <div className="text-xs font-semibold text-[var(--color-heap)] mb-2 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-1.5 h-1.5 rounded-full bg-[var(--color-heap)]" />
+                HEAP
+              </div>
+              <Tooltip content="Heap: A larger memory region where complex objects and arrays are stored. Variables on the stack 'point' to these objects.">
+                <Info className="w-3 h-3 cursor-help text-[var(--color-text-muted)]" />
+              </Tooltip>
             </div>
             <div className="space-y-2">
               <AnimatePresence>

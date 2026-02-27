@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion'
+import { Info } from 'lucide-react'
 import { useExecutionStore } from '@/store'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui'
+import { Card, CardHeader, CardTitle, CardContent, Tooltip } from '@/components/ui'
 import type { EventLoopPhase } from '@/types'
 
 const phaseLabels: Record<EventLoopPhase, string> = {
@@ -31,7 +32,7 @@ export function EventLoopAnimation() {
 
   return (
     <Card className="h-full flex flex-col">
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="flex items-center gap-2">
           <motion.div
             animate={{ rotate: currentPhase !== 'idle' ? 360 : 0 }}
@@ -40,8 +41,11 @@ export function EventLoopAnimation() {
           />
           Event Loop
         </CardTitle>
+        <Tooltip content="The Event Loop is a constantly running process that monitors both the Call Stack and the Task Queue. It moves tasks from the queue to the stack when the stack is empty.">
+          <Info className="w-3.5 h-3.5 text-[var(--color-text-muted)] cursor-help" />
+        </Tooltip>
       </CardHeader>
-      <CardContent className="flex-1 flex flex-col items-center justify-center">
+      <CardContent className="flex-1 flex flex-col items-center justify-center pt-2">
         {/* Circular diagram */}
         <div className="relative w-48 h-48">
           {/* Center */}

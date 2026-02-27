@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from 'framer-motion'
+import { Info } from 'lucide-react'
 import { useExecutionStore } from '@/store'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui'
+import { Card, CardHeader, CardTitle, CardContent, Tooltip } from '@/components/ui'
 
 export function CallStackPanel() {
   const { executionSteps, currentStepIndex } = useExecutionStore()
@@ -13,16 +14,21 @@ export function CallStackPanel() {
 
   return (
     <Card className="h-full flex flex-col">
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-[var(--color-stack)]" />
           Call Stack
         </CardTitle>
-        <span className="text-xs text-[var(--color-text-muted)]">
-          {callStack.length} frame{callStack.length !== 1 ? 's' : ''}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[var(--color-text-muted)]">
+            {callStack.length} frame{callStack.length !== 1 ? 's' : ''}
+          </span>
+          <Tooltip content="A mechanism to keep track of function calls. When a function is called, it's pushed onto the stack; when it returns, it's popped off.">
+            <Info className="w-3.5 h-3.5 text-[var(--color-text-muted)] cursor-help" />
+          </Tooltip>
+        </div>
       </CardHeader>
-      <CardContent className="flex-1 overflow-auto">
+      <CardContent className="flex-1 overflow-auto pt-2">
         {callStack.length === 0 ? (
           <div className="text-sm text-[var(--color-text-muted)] text-center py-4">
             Stack is empty

@@ -77,8 +77,8 @@ export function ExecutionControls() {
   const canGoForward = currentStepIndex < executionSteps.length - 1
 
   return (
-    <div className="border-t border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3">
-      <div className="flex items-center gap-4">
+    <div className="border-t border-[var(--color-border)] bg-[var(--color-bg-secondary)] p-3 overflow-hidden">
+      <div className="flex flex-wrap items-center gap-y-3 gap-x-4">
         {/* Run Button */}
         <Button
           onClick={handleRun}
@@ -101,7 +101,7 @@ export function ExecutionControls() {
         </Button>
 
         {/* Divider */}
-        <div className="h-6 w-px bg-[var(--color-border)]" />
+        <div className="hidden sm:block h-6 w-px bg-[var(--color-border)]" />
 
         {/* Navigation Controls */}
         <div className="flex items-center gap-1">
@@ -152,7 +152,7 @@ export function ExecutionControls() {
 
         {/* Step Counter */}
         {hasSteps && (
-          <div className="text-sm text-[var(--color-text-secondary)]">
+          <div className="text-sm text-[var(--color-text-secondary)] whitespace-nowrap">
             Step{' '}
             <span className="font-mono text-[var(--color-text-primary)]">
               {currentStepIndex + 1}
@@ -165,8 +165,8 @@ export function ExecutionControls() {
         )}
 
         {/* Speed Control */}
-        <div className="ml-auto flex items-center gap-2">
-          <span className="text-xs text-[var(--color-text-muted)]">Speed:</span>
+        <div className="flex-1 min-w-[150px] flex items-center justify-end gap-2 ml-auto">
+          <span className="text-[10px] uppercase tracking-wider font-bold text-[var(--color-text-muted)] whitespace-nowrap">Speed</span>
           <input
             type="range"
             min="0.25"
@@ -174,9 +174,9 @@ export function ExecutionControls() {
             step="0.25"
             value={playbackSpeed}
             onChange={(e) => setSpeed(parseFloat(e.target.value))}
-            className="w-20 accent-[var(--color-accent-blue)]"
+            className="w-16 sm:w-24 accent-[var(--color-accent-blue)] cursor-pointer"
           />
-          <span className="text-xs font-mono text-[var(--color-text-secondary)] w-10">
+          <span className="text-xs font-mono text-[var(--color-text-secondary)] w-8 text-right">
             {playbackSpeed}x
           </span>
         </div>
