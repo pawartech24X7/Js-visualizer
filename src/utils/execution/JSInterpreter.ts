@@ -13,6 +13,7 @@ import type {
   EventLoopPhase,
   ExecutionPhase,
   ExecutionAction,
+ EnvironmentRecord,
 } from '@/types'
 import * as acorn from 'acorn'
 import type { Node, Program } from 'acorn'
@@ -21,6 +22,7 @@ let stepCounter = 0
 let heapIdCounter = 0
 let contextIdCounter = 0
 let taskIdCounter = 0
+let envIdCounter = 0
 
 function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
@@ -31,6 +33,7 @@ function resetCounters(): void {
   heapIdCounter = 0
   contextIdCounter = 0
   taskIdCounter = 0
+  envIdCounter = 0
 }
 
 interface InterpreterState {
@@ -46,6 +49,11 @@ interface InterpreterState {
   eventLoopPhase: EventLoopPhase
   currentContextId: string
   virtualTime: number
+}
+
+// Helper function to get current context
+function getCurrentContext(state: InterpreterState): ExecutionContext | null {
+  return state.executionContexts.find((c) => c.id === state.currentContextId) || null
 }
 
 function createRuntimeValue(value: unknown): RuntimeValue {
@@ -68,6 +76,7 @@ function cloneState(state: InterpreterState): InterpreterState {
       variableEnvironment: { ...ctx.variableEnvironment },
       lexicalEnvironment: { ...ctx.lexicalEnvironment },
       hoistedDeclarations: [...ctx.hoistedDeclarations],
+      tdzVariables: new Set(ctx.tdzVariables),
     })),
     memoryStack: state.memoryStack.map((s) => ({ ...s, value: { ...s.value } })),
     memoryHeap: state.memoryHeap.map((h) => ({
@@ -75,6 +84,7 @@ function cloneState(state: InterpreterState): InterpreterState {
       properties: { ...h.properties },
       arrayElements: h.arrayElements ? [...h.arrayElements] : undefined,
       functionParams: h.functionParams ? [...h.functionParams] : undefined,
+     capturedEnvironment: h.capturedEnvironment ? { ...h.capturedEnvironment } : null,
     })),
     webApis: state.webApis.map((w) => ({ ...w })),
     microTaskQueue: state.microTaskQueue.map((m) => ({ ...m })),
@@ -129,31 +139,54 @@ function createStep(
 
 function createGlobalContext(): ExecutionContext {
   contextIdCounter++
-  return {
+ const globalEnv: EnvironmentRecord = {
+    id: `env-global`,
+    type: 'global',
+   bindings: {},
+  outer: null,
+  }
+  
+ return {
     id: `ctx-global`,
     type: 'global',
     name: 'Global',
-    parentId: null,
-    variableEnvironment: {},
-    lexicalEnvironment: {},
-    thisBinding: { type: 'object', value: 'window' },
-    outerEnvironmentRef: null,
-    hoistedDeclarations: [],
+   parentId: null,
+   variableEnvironment: globalEnv,
+   lexicalEnvironment: globalEnv,
+  thisBinding: { type: 'object', value: 'window' },
+  hoistedDeclarations: [],
+  tdzVariables: new Set(),
   }
 }
 
-function createFunctionContext(name: string, parentId: string): ExecutionContext {
+function createFunctionContext(name: string, outerEnv: EnvironmentRecord | null): ExecutionContext {
   contextIdCounter++
-  return {
+  
+  // Create function-level lexical and variable environments
+  const funcVarEnv: EnvironmentRecord = {
+    id: `env-var-func-${contextIdCounter}`,
+    type: 'function',
+   bindings: {},
+  outer: outerEnv, // Set captured environment as outer reference
+  }
+  
+  const funcLexEnv: EnvironmentRecord = {
+    id: `env-lex-func-${contextIdCounter}`,
+    type: 'function',
+   bindings: {},
+  outer: outerEnv,
+  }
+  
+ return {
     id: `ctx-${contextIdCounter}`,
     type: 'function',
     name,
-    parentId,
-    variableEnvironment: {},
-    lexicalEnvironment: {},
-    thisBinding: { type: 'undefined', value: undefined },
-    outerEnvironmentRef: parentId,
-    hoistedDeclarations: [],
+   parentId: null,
+   variableEnvironment: funcVarEnv,
+   lexicalEnvironment: funcLexEnv,
+  thisBinding: { type: 'undefined', value: undefined },
+  hoistedDeclarations: [],
+  tdzVariables: new Set(),
   }
 }
 
@@ -241,7 +274,7 @@ export function interpret(sourceCode: string): ExecutionStep[] {
   )
 
   // Creation phase - hoist declarations
-  hoistDeclarations(ast, state, globalContext.id, steps)
+  hoistDeclarations(ast, state, globalContext, steps)
 
   // Execution phase - execute statements
   for (const node of ast.body) {
@@ -280,23 +313,23 @@ function getNodeColumn(node: AnyNode): number {
 function hoistDeclarations(
   bodyNode: AnyNode,
   state: InterpreterState,
-  contextId: string,
+  context: ExecutionContext,
   steps: ExecutionStep[]
 ): void {
-  const context = state.executionContexts.find((c) => c.id === contextId)
   if (!context || !bodyNode.body) return
 
   const nodes = Array.isArray(bodyNode.body) ? bodyNode.body : [bodyNode.body]
+ const varEnv = context.variableEnvironment
 
   for (const node of nodes) {
     if (node.type === 'FunctionDeclaration') {
-      const funcNode = node as AnyNode
-      const name = funcNode.id?.name || 'anonymous'
+   const funcNode = node as AnyNode
+   const name = funcNode.id?.name || 'anonymous'
 
-      // Create heap object for function
+      // Create heap object for function with captured environment
       heapIdCounter++
-      const heapId = `heap-${heapIdCounter}`
-      const funcHeapObj: HeapObject = {
+    const heapId = `heap-${heapIdCounter}`
+    const funcHeapObj: HeapObject = {
         id: heapId,
         type: 'function',
         properties: {},
@@ -304,33 +337,34 @@ function hoistDeclarations(
         functionParams: funcNode.params?.map((p: AnyNode) => p.name) || [],
         functionBody: 'function body',
         functionAst: funcNode.body,
-        closureContextId: contextId,
+        capturedEnvironment: context.lexicalEnvironment, // Capture current lexical environment
         referenceCount: 1,
-        createdAtStep: stepCounter,
+    createdAtStep: stepCounter,
       }
-      state.memoryHeap.push(funcHeapObj)
+   state.memoryHeap.push(funcHeapObj)
 
-      // Add to variable environment
-      context.variableEnvironment[name] = {
+      // Add to variable environment (hoisted)
+     varEnv.bindings[name] = {
         type: 'function',
         value: name,
         heapId,
+        initialized: true,
       }
-      context.hoistedDeclarations.push(name)
+    context.hoistedDeclarations.push(name)
 
       // Add to memory stack
-      state.memoryStack.push({
+    state.memoryStack.push({
         id: generateId('mem'),
         variableName: name,
-        scopeId: contextId,
+        scopeId: context.id,
         type: 'reference',
         value: { type: 'function', value: name, heapId },
         heapReferenceId: heapId,
       })
 
-      steps.push(
-        createStep(
-          state,
+    steps.push(
+      createStep(
+        state,
           node,
           'creation',
           'hoisting',
@@ -340,28 +374,30 @@ function hoistDeclarations(
         )
       )
     } else if (node.type === 'VariableDeclaration') {
-      const varNode = node as AnyNode
+   const varNode = node as AnyNode
       if (varNode.kind === 'var') {
         for (const decl of varNode.declarations) {
-          const name = decl.id?.name || 'unknown'
+       const name = decl.id?.name || 'unknown'
 
-          context.variableEnvironment[name] = {
+          // Hoist var to variable environment
+          varEnv.bindings[name] = {
             type: 'undefined',
             value: undefined,
+           initialized: true, // var is initialized during creation
           }
-          context.hoistedDeclarations.push(name)
+        context.hoistedDeclarations.push(name)
 
-          state.memoryStack.push({
+        state.memoryStack.push({
             id: generateId('mem'),
             variableName: name,
-            scopeId: contextId,
+            scopeId: context.id,
             type: 'primitive',
             value: { type: 'undefined', value: undefined },
           })
 
-          steps.push(
-            createStep(
-              state,
+        steps.push(
+          createStep(
+            state,
               node,
               'creation',
               'hoisting',
@@ -443,6 +479,52 @@ function executeNode(
       return executeWhileStatement(node, state, steps, sourceCode)
 
     case 'BlockStatement': {
+      // CRITICAL FIX: Create new block-level lexical environment for let/const
+     const context = getCurrentContext(state)
+      if (context) {
+        // Save current lexical environment
+       const outerEnv = context.lexicalEnvironment
+        
+        // Create new block environment
+        envIdCounter++
+       const blockEnv: EnvironmentRecord = {
+          id: `env-block-${envIdCounter}`,
+          type: 'block',
+         bindings: {},
+         outer: outerEnv,
+        }
+        
+        // Set as current lexical environment
+       context.lexicalEnvironment = blockEnv
+
+       steps.push(
+       createStep(
+         state,
+            node,
+            'execution',
+            'create-object',
+            'Creating block-level lexical environment',
+            getNodeLine(node),
+            getNodeColumn(node)
+          )
+        )
+
+        let lastVal: RuntimeValue = { type: 'undefined', value: undefined }
+        for (const stmt of node.body) {
+          lastVal = executeNode(stmt, state, steps, sourceCode)
+          if (lastVal.isReturn) {
+            // Restore environment before returning
+           context.lexicalEnvironment = outerEnv
+            return lastVal
+          }
+        }
+
+        // Destroy block environment when exiting block
+       context.lexicalEnvironment = outerEnv
+        return lastVal
+      }
+      
+      // Fallback if no context
       let lastVal: RuntimeValue = { type: 'undefined', value: undefined }
       for (const stmt of node.body) {
         lastVal = executeNode(stmt, state, steps, sourceCode)
@@ -494,19 +576,29 @@ function executeVariableDeclaration(
 
     // For var, update existing hoisted declaration
     if (kind === 'var') {
-      const existingSlot = state.memoryStack.find(
+    const existingSlot = state.memoryStack.find(
         (s) => s.variableName === name && s.scopeId === context.id
       )
       if (existingSlot) {
-        existingSlot.value = value
+       existingSlot.value = value
         existingSlot.type = value.heapId ? 'reference' : 'primitive'
         existingSlot.heapReferenceId = value.heapId
       }
-      context.variableEnvironment[name] = value
+   context.variableEnvironment.bindings[name] = value
     } else {
-      // let/const go to lexical environment
-      context.lexicalEnvironment[name] = value
-      state.memoryStack.push({
+      // let/const go to lexical environment with TDZ tracking
+   const isInitialized = !!decl.init
+      
+   context.lexicalEnvironment.bindings[name] = {
+       ...value,
+       initialized: isInitialized,
+     }
+      
+     if (!isInitialized) {
+     context.tdzVariables.add(name)
+     }
+      
+   state.memoryStack.push({
         id: generateId('mem'),
         variableName: name,
         scopeId: context.id,
@@ -589,17 +681,19 @@ function executeCallExpression(
   if (funcValue.type === 'function' && funcValue.heapId) {
     const heapObj = state.memoryHeap.find((h) => h.id === funcValue.heapId)
     if (heapObj && heapObj.functionAst) {
-      // Create new execution context for function
-      const outerEnv = heapObj.closureContextId || state.currentContextId
-      const newContext = createFunctionContext(funcName, outerEnv)
-      state.executionContexts.push(newContext)
+      // CRITICAL FIX: Use captured environment for function's outer lexical environment
+    const capturedEnv = heapObj.capturedEnvironment
+      
+      // Create new execution context with captured environment as outer
+    const newContext = createFunctionContext(funcName, capturedEnv)
+    state.executionContexts.push(newContext)
 
       // Map parameters to arguments
       if (heapObj.functionParams) {
-        heapObj.functionParams.forEach((paramName, index) => {
-          const val = args[index] || { type: 'undefined', value: undefined }
-          newContext.lexicalEnvironment[paramName] = val
-          state.memoryStack.push({
+       heapObj.functionParams.forEach((paramName, index) => {
+        const val = args[index] || { type: 'undefined', value: undefined }
+         newContext.lexicalEnvironment.bindings[paramName] = val
+         state.memoryStack.push({
             id: generateId('mem'),
             variableName: paramName,
             scopeId: newContext.id,
@@ -625,7 +719,7 @@ function executeCallExpression(
       state.currentContextId = newContext.id
 
       // Hoist declarations inside function
-      hoistDeclarations(heapObj.functionAst, state, newContext.id, steps)
+      hoistDeclarations(heapObj.functionAst, state, newContext, steps)
 
       steps.push(
         createStep(
@@ -802,18 +896,19 @@ function executePromiseConstructor(
   state.promises.push(promise)
 
   heapIdCounter++
-  const heapId = `heap-${heapIdCounter}`
-  const promiseHeap: HeapObject = {
+ const heapId = `heap-${heapIdCounter}`
+ const promiseHeap: HeapObject = {
     id: heapId,
     type: 'object',
-    properties: {
-      '[[PromiseState]]': { type: 'string', value: 'pending' },
-      '[[PromiseResult]]': { type: 'undefined', value: undefined },
-    },
-    referenceCount: 1,
-    createdAtStep: stepCounter + 1,
-  }
-  state.memoryHeap.push(promiseHeap)
+   properties: {
+     '[[PromiseState]]': { type: 'string', value: 'pending' },
+     '[[PromiseResult]]': { type: 'undefined', value: undefined },
+   },
+ referenceCount: 1,
+  createdAtStep: stepCounter +1,
+  capturedEnvironment: null, // Promises don't capture environment
+ }
+ state.memoryHeap.push(promiseHeap)
 
   steps.push(
     createStep(
@@ -855,41 +950,41 @@ function executePromiseMethod(
   sourceCode: string
 ): RuntimeValue {
   if (method === 'resolve') {
-    const value: RuntimeValue = node.arguments[0]
+   const value: RuntimeValue = node.arguments[0]
       ? executeNode(node.arguments[0], state, steps, sourceCode)
       : { type: 'undefined', value: undefined }
 
-    taskIdCounter++
-    const promiseId = `promise-${taskIdCounter}`
+   taskIdCounter++
+  const promiseId = `promise-${taskIdCounter}`
 
-    const promise: PromiseState = {
-      id: promiseId,
-      label: `Promise.resolve`,
-      status: 'fulfilled',
-      value,
-      thenHandlers: [],
-      catchHandlers: [],
-      finallyHandlers: [],
-      createdAtStep: stepCounter + 1,
-      resolvedAtStep: stepCounter + 1,
+  const promise: PromiseState = {
+     id: promiseId,
+     label: `Promise.resolve`,
+    status: 'fulfilled',
+     value,
+   thenHandlers: [],
+     catchHandlers: [],
+     finallyHandlers: [],
+   createdAtStep: stepCounter +1,
+    resolvedAtStep: stepCounter + 1,
     }
-    state.promises.push(promise)
+  state.promises.push(promise)
 
-    steps.push(
-      createStep(
-        state,
-        node,
-        'execution',
-        'create-promise',
-        `Promise.resolve(${formatValue(value)})`,
-        getNodeLine(node),
-        getNodeColumn(node)
-      )
-    )
+  steps.push(
+   createStep(
+    state,
+       node,
+       'execution',
+       'create-promise',
+       `Promise.resolve(${formatValue(value)})`,
+       getNodeLine(node),
+       getNodeColumn(node)
+     )
+   )
 
     heapIdCounter++
-    const heapId = `heap-${heapIdCounter}`
-    const promiseHeap: HeapObject = {
+  const heapId = `heap-${heapIdCounter}`
+ const promiseHeap: HeapObject = {
       id: heapId,
       type: 'object',
       properties: {
@@ -898,13 +993,68 @@ function executePromiseMethod(
       },
       referenceCount: 1,
       createdAtStep: stepCounter,
-    }
-    state.memoryHeap.push(promiseHeap)
+   capturedEnvironment: null,
+   }
+ state.memoryHeap.push(promiseHeap)
 
     return { type: 'object', value: 'Promise' }
   }
+  
+  if (method === 'then') {
+    // CRITICAL FIX: Queue .then() callback as microtask
+  const callback = node.arguments[0]
+    
+  if (callback) {
+   const callbackName = callback.type === 'Identifier' ? callback.name : 'anonymous callback'
+      
+     // Get the resolved value from the promise this was called on
+   const lastPromise = state.promises[state.promises.length - 1]
+  //  const promiseValue = lastPromise?.status === 'fulfilled' ? lastPromise.value : { type: 'undefined', value: undefined }
+      
+     // Queue microtask with the callback
+    taskIdCounter++
+  const microtask: MicroTask = {
+      id: `microtask-${taskIdCounter}`,
+      type: 'promise-then',
+      callbackName,
+     promiseId: lastPromise?.id,
+   createdAtStep: stepCounter +1,
+    }
+  state.microTaskQueue.push(microtask)
+      
+  steps.push(
+   createStep(
+    state,
+      node,
+      'async',
+      'enqueue-microtask',
+     `.then() handler "${callbackName}" queued as microtask`,
+     getNodeLine(node),
+     getNodeColumn(node)
+     )
+    )
+   }
+    
+    // Return a new promise for chaining (simplified)
+  heapIdCounter++
+ const heapId = `heap-${heapIdCounter}`
+ const newPromiseHeap: HeapObject = {
+     id: heapId,
+     type: 'object',
+    properties: {
+      '[[PromiseState]]': { type: 'string', value: 'pending' },
+      '[[PromiseResult]]': { type: 'undefined', value: undefined },
+    },
+   referenceCount: 1,
+  createdAtStep: stepCounter +1,
+   capturedEnvironment: null,
+   }
+ state.memoryHeap.push(newPromiseHeap)
+    
+   return { type: 'object', value: 'Promise', heapId }
+  }
 
-  return { type: 'undefined', value: undefined }
+ return { type: 'undefined', value: undefined }
 }
 
 function executeAssignment(
@@ -916,55 +1066,43 @@ function executeAssignment(
   const name = node.left?.name || 'unknown'
   const value = executeNode(node.right, state, steps, '')
 
-  // Update in environment - search up closure chain
-  let currentContextId: string | null = state.currentContextId
-  let found = false
-
-  while (currentContextId) {
-    const ctx = state.executionContexts.find((c) => c.id === currentContextId)
-    if (!ctx) break
-
-    if (name in ctx.lexicalEnvironment) {
-      ctx.lexicalEnvironment[name] = value
-      found = true
-      break
+  // Update in environment - search up closure chain through lexical environments
+  const context = getCurrentContext(state)
+ let found = false
+  if (context) {
+    let currentEnv: EnvironmentRecord | null = context.lexicalEnvironment
+    
+    while (currentEnv) {
+      if (name in currentEnv.bindings) {
+        currentEnv.bindings[name] = { ...value, initialized: true }
+       found = true
+        break
+      }
+      currentEnv = currentEnv.outer
     }
-    if (name in ctx.variableEnvironment) {
-      ctx.variableEnvironment[name] = value
-      found = true
-      break
-    }
-
-    currentContextId = ctx.outerEnvironmentRef
   }
 
   // If not found in closure chain, it might be a new global variable (simplified)
   if (!found) {
-    const globalCtx = state.executionContexts.find((c) => c.type === 'global')
+   const globalCtx = state.executionContexts.find((c) => c.type === 'global')
     if (globalCtx) {
-      globalCtx.variableEnvironment[name] = value
+      globalCtx.lexicalEnvironment.bindings[name] = { ...value, initialized: true }
     }
   }
 
-  // Update memory slot
-  let searchContextId: string | null = state.currentContextId
-  while (searchContextId) {
-    const slot = state.memoryStack.find(
-      (s) => s.variableName === name && s.scopeId === searchContextId
-    )
-    if (slot) {
-      slot.value = value
-      slot.type = value.heapId ? 'reference' : 'primitive'
-      slot.heapReferenceId = value.heapId
-      break
-    }
-    const ctx = state.executionContexts.find((c) => c.id === searchContextId)
-    searchContextId = ctx?.outerEnvironmentRef || null
+  // Update memory slot - simplified, just update in current context
+ const slot = state.memoryStack.find(
+    (s) => s.variableName === name && s.scopeId === state.currentContextId
+  )
+  if (slot) {
+    slot.value = value
+    slot.type = value.heapId ? 'reference' : 'primitive'
+    slot.heapReferenceId = value.heapId
   }
 
   steps.push(
-    createStep(
-      state,
+  createStep(
+    state,
       node,
       'execution',
       'assign-variable',
@@ -974,7 +1112,7 @@ function executeAssignment(
     )
   )
 
-  return value
+ return value
 }
 
 function evaluateBinaryExpression(
@@ -1106,59 +1244,57 @@ function evaluateUpdateExpression(
     newVal = currentVal - 1
   }
 
-  // Update value - search up closure chain
-  let currentContextId: string | null = state.currentContextId
-  while (currentContextId) {
-    const ctx = state.executionContexts.find((c) => c.id === currentContextId)
-    if (!ctx) break
-
-    if (name in ctx.lexicalEnvironment) {
-      ctx.lexicalEnvironment[name] = { type: 'number', value: newVal }
-      break
+  // Update value - search up closure chain through lexical environments
+  const context = getCurrentContext(state)
+  if (context) {
+    let currentEnv: EnvironmentRecord | null = context.lexicalEnvironment
+    
+    while (currentEnv) {
+      if (name in currentEnv.bindings) {
+        currentEnv.bindings[name] = { type: 'number', value: newVal, initialized: true }
+        break
+      }
+      currentEnv = currentEnv.outer
     }
-    if (name in ctx.variableEnvironment) {
-      ctx.variableEnvironment[name] = { type: 'number', value: newVal }
-      break
-    }
-    currentContextId = ctx.outerEnvironmentRef
   }
 
-  // Update memory stack slot
-  let searchContextId: string | null = state.currentContextId
-  while (searchContextId) {
-    const slot = state.memoryStack.find(
-      (s) => s.variableName === name && s.scopeId === searchContextId
-    )
-    if (slot) {
-      slot.value = { type: 'number', value: newVal }
-      break
-    }
-    const ctx = state.executionContexts.find((c) => c.id === searchContextId)
-    searchContextId = ctx?.outerEnvironmentRef || null
+  // Update memory stack slot - simplified
+ const slot = state.memoryStack.find(
+    (s) => s.variableName === name && s.scopeId === state.currentContextId
+  )
+  if (slot) {
+    slot.value = { type: 'number', value: newVal }
   }
 
-  return node.prefix ? { type: 'number', value: newVal } : { type: 'number', value: currentVal }
+ return node.prefix ? { type: 'number', value: newVal } : { type: 'number', value: currentVal }
 }
 
 function resolveIdentifier(name: string, state: InterpreterState): RuntimeValue {
-  // Search from current context up through scope chain
-  let currentContextId: string | null = state.currentContextId
+  // Get current context
+  const context = getCurrentContext(state)
+  if (!context) return { type: 'undefined', value: undefined }
 
-  while (currentContextId) {
-    const ctx = state.executionContexts.find((c) => c.id === currentContextId)
-    if (!ctx) break
-
-    if (name in ctx.lexicalEnvironment) {
-      return ctx.lexicalEnvironment[name]
+  // Search from current lexical environment up through outer chain
+  let currentEnv = context.lexicalEnvironment
+  
+  while (currentEnv) {
+    if (name in currentEnv.bindings) {
+    const binding = currentEnv.bindings[name]
+      
+      // Check TDZ - variable must be initialized
+      if (binding.initialized === false) {
+      throw new ReferenceError(`Cannot access '${name}' before initialization`)
+      }
+      
+      return binding
     }
-    if (name in ctx.variableEnvironment) {
-      return ctx.variableEnvironment[name]
-    }
-
-    currentContextId = ctx.outerEnvironmentRef
+    
+    // Move to outer environment
+   currentEnv = currentEnv.outer!  // Non-null assertion - loop condition checks for null
   }
 
-  return { type: 'undefined', value: undefined }
+  // Not found in scope chain
+ return { type: 'undefined', value: undefined }
 }
 
 function evaluateMemberExpression(
@@ -1209,11 +1345,12 @@ function createObjectExpression(
   const heapObj: HeapObject = {
     id: heapId,
     type: 'object',
-    properties,
-    referenceCount: 1,
-    createdAtStep: stepCounter + 1,
-  }
-  state.memoryHeap.push(heapObj)
+   properties,
+ referenceCount: 1,
+  createdAtStep: stepCounter +1,
+  capturedEnvironment: null, // Objects don't capture environment
+ }
+ state.memoryHeap.push(heapObj)
 
   steps.push(
     createStep(
@@ -1246,12 +1383,13 @@ function createArrayExpression(
   const heapObj: HeapObject = {
     id: heapId,
     type: 'array',
-    properties: { length: { type: 'number', value: elements.length } },
-    arrayElements: elements,
-    referenceCount: 1,
-    createdAtStep: stepCounter + 1,
-  }
-  state.memoryHeap.push(heapObj)
+   properties: { length: { type: 'number', value: elements.length } },
+   arrayElements: elements,
+ referenceCount: 1,
+  createdAtStep: stepCounter +1,
+  capturedEnvironment: null, // Arrays don't capture environment
+ }
+ state.memoryHeap.push(heapObj)
 
   steps.push(
     createStep(
@@ -1287,10 +1425,18 @@ function createFunctionExpression(
     functionParams: params,
     functionBody: 'function body',
     functionAst: node.body,
-    closureContextId: state.currentContextId,
+   capturedEnvironment: null, // Will be set below - capture current lexical environment
     referenceCount: 1,
-    createdAtStep: stepCounter + 1,
+   createdAtStep: stepCounter + 1,
   }
+  
+  // CRITICAL FIX: Capture the LEXICAL ENVIRONMENT where function is defined
+  // This is what makes closures work!
+  const currentContext = getCurrentContext(state)
+  if (currentContext) {
+    heapObj.capturedEnvironment = currentContext.lexicalEnvironment
+  }
+  
   state.memoryHeap.push(heapObj)
 
   steps.push(
@@ -1406,16 +1552,17 @@ function executeNewExpression(
 
   // Generic object creation
   heapIdCounter++
-  const heapId = `heap-${heapIdCounter}`
+ const heapId = `heap-${heapIdCounter}`
 
-  const heapObj: HeapObject = {
+ const heapObj: HeapObject = {
     id: heapId,
     type: 'object',
-    properties: {},
-    referenceCount: 1,
-    createdAtStep: stepCounter + 1,
-  }
-  state.memoryHeap.push(heapObj)
+   properties: {},
+ referenceCount: 1,
+  createdAtStep: stepCounter +1,
+  capturedEnvironment: null,
+ }
+ state.memoryHeap.push(heapObj)
 
   steps.push(
     createStep(
@@ -1474,24 +1621,55 @@ function processEventLoop(state: InterpreterState, steps: ExecutionStep[]): void
       }
     }
 
-    // Process all microtasks first
-    state.eventLoopPhase = 'checking-microtasks'
-    while (state.microTaskQueue.length > 0) {
-      const microtask = state.microTaskQueue.shift()!
-      state.eventLoopPhase = 'executing-microtask'
+    // Process all microtasks first (CRITICAL: before macrotasks!)
+  state.eventLoopPhase = 'checking-microtasks'
+  while (state.microTaskQueue.length > 0) {
+  const microtask = state.microTaskQueue.shift()!
+  state.eventLoopPhase = 'executing-microtask'
 
-      steps.push(
-        createStep(
-          state,
-          null,
-          'async',
-          'dequeue-microtask',
-          `Executing microtask: ${microtask.callbackName}`,
-          1,
-          0
-        )
-      )
+  steps.push(
+  createStep(
+    state,
+       null,
+       'async',
+       'dequeue-microtask',
+      `Executing microtask: ${microtask.callbackName}`,
+       1,
+       0
+     )
+   )
+    
+    // Execute promise.then() callback if we have the promise value
+  if (microtask.type === 'promise-then' && microtask.promiseId) {
+  const promise = state.promises.find(p => p.id === microtask.promiseId)
+  if (promise && promise.status === 'fulfilled' && promise.value) {
+      // Simulate callback execution with promise result
+  steps.push(
+    createStep(
+      state,
+         null,
+         'async',
+         'call-function',
+        `${microtask.callbackName}(${formatValue(promise.value)})`,
+        1,
+         0
+       )
+     )
+      
+      // Log the result if it's a callback that would log (simplified simulation)
+  if (microtask.callbackName.includes('onFulfilled') || microtask.callbackName.includes('log')) {
+     const entry: ConsoleEntry = {
+         id: generateId('console'),
+        type: 'log',
+        args: [promise.value],
+        timestamp: Date.now(),
+     stepNumber: stepCounter +1,
+       }
+    state.consoleOutput.push(entry)
+      }
     }
+   }
+  }
 
     // Process one macrotask
     if (state.taskQueue.length > 0) {

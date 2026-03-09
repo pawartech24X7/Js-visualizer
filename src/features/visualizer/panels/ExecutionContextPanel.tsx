@@ -55,54 +55,39 @@ interface ContextItemProps {
 }
 
 function ContextItem({ context, isActive }: ContextItemProps) {
-  const { executionSteps, currentStepIndex } = useExecutionStore()
-  const currentStep = currentStepIndex >= 0 && currentStepIndex < executionSteps.length
-    ? executionSteps[currentStepIndex]
-    : null
-  const contexts = currentStep?.executionContexts || []
-
   const [isExpanded, setIsExpanded] = useState(true)
 
-  const varEnvEntries = Object.entries(context.variableEnvironment)
-  const lexEnvEntries = Object.entries(context.lexicalEnvironment)
+  // Access bindings from EnvironmentRecord (after refactoring)
+  const varEnvEntries = Object.entries(context.variableEnvironment.bindings)
+  const lexEnvEntries = Object.entries(context.lexicalEnvironment.bindings)
 
   // Find outer environment variables (Closures vs Global)
   const closureEntries: { name: string, value: RuntimeValue, contextName: string }[] = []
   const globalEntries: { name: string, value: RuntimeValue }[] = []
 
-  let outerId = context.outerEnvironmentRef
-  while (outerId) {
-    const outerCtx = contexts.find(c => c.id === outerId)
-    if (!outerCtx) break
-
-    if (outerCtx.type === 'global') {
-      // Collect Global variables
-      Object.entries(outerCtx.lexicalEnvironment).forEach(([name, value]) => {
-        if (!globalEntries.find(e => e.name === name)) {
+  // Traverse through lexical environment chain instead of outerEnvironmentRef
+  let outerEnv = context.lexicalEnvironment.outer
+  while (outerEnv) {
+    // Collect variables from outer environments - use non-null assertion since while loop checks
+  Object.entries(outerEnv!.bindings).forEach(([name, value]) => {
+      // Check if this is a global environment
+   if (outerEnv!.type === 'global') {
+     if (!globalEntries.find(e => e.name === name)) {
           globalEntries.push({ name, value })
         }
-      })
-      Object.entries(outerCtx.variableEnvironment).forEach(([name, value]) => {
-        if (!globalEntries.find(e => e.name === name)) {
-          globalEntries.push({ name, value })
+      } else {
+        // Closure variables from function/block environments
+     if (!closureEntries.find(e => e.name === name) && !lexEnvEntries.find(e => e[0] === name)) {
+          closureEntries.push({ 
+            name, 
+            value, 
+        contextName: outerEnv!.type === 'function' ? 'Function' : 'Block' 
+          })
         }
-      })
-    } else {
-      // Collect Closure variables (Function/Block contexts)
-      Object.entries(outerCtx.lexicalEnvironment).forEach(([name, value]) => {
-        // Avoid duplicates if shadowed
-        if (!closureEntries.find(e => e.name === name) && !lexEnvEntries.find(e => e[0] === name)) {
-          closureEntries.push({ name, value, contextName: outerCtx.name })
-        }
-      })
-      Object.entries(outerCtx.variableEnvironment).forEach(([name, value]) => {
-        if (!closureEntries.find(e => e.name === name) && !varEnvEntries.find(e => e[0] === name)) {
-          closureEntries.push({ name, value, contextName: outerCtx.name })
-        }
-      })
-    }
-
-    outerId = outerCtx.outerEnvironmentRef
+      }
+    })
+    
+  outerEnv = outerEnv!.outer
   }
 
   const contextTooltip = context.type === 'global'
@@ -285,20 +270,20 @@ function VariableRow({ name, value, contextName }: VariableRowProps) {
         </span>
       )}
       <span className="text-[var(--color-text-muted)] mx-1">=</span>
-      <span className={getValueColor(value.type)}>{formatValue(value)}</span>
+      <span className={getValueColor(value?.type)}>{formatValue(value)}</span>
     </div>
   )
 }
 
 function formatValue(value: RuntimeValue): string {
-  if (value.type === 'undefined') return 'undefined'
-  if (value.type === 'null') return 'null'
-  if (value.type === 'string') return `"${value.value}"`
-  if (value.type === 'boolean') return String(value.value)
-  if (value.type === 'number') return String(value.value)
-  if (value.type === 'function') return `ƒ ${value.value || 'anonymous'}`
-  if (value.type === 'object') return '{...}'
-  if (value.type === 'array') return '[...]'
+  if (value?.type === 'undefined') return 'undefined'
+  if (value?.type === 'null') return 'null'
+  if (value?.type === 'string') return `"${value.value}"`
+  if (value?.type === 'boolean') return String(value.value)
+  if (value?.type === 'number') return String(value.value)
+  if (value?.type === 'function') return `ƒ ${value.value || 'anonymous'}`
+  if (value?.type === 'object') return '{...}'
+  if (value?.type === 'array') return '[...]'
   return String(value.value)
 }
 

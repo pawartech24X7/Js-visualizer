@@ -11,4 +11,27 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    // Increase chunk size warning limit (optional)
+    chunkSizeWarningLimit: 1000,
+    
+    // Enable code splitting for better performance
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Split vendor libraries into separate chunk
+          vendor: ['react', 'react-dom'],
+          
+          // Split Monaco editor (it's large)
+          monaco: ['@monaco-editor/react'],
+          
+          // Split animation library
+          framer: ['framer-motion'],
+          
+          // Split Acorn parser
+          acorn: ['acorn', 'acorn-walk'],
+        },
+      },
+    },
+  },
 })

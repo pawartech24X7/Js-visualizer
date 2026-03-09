@@ -26,6 +26,7 @@ function App() {
       sidebar={<Sidebar />}
     >
       {renderContent()}
+      <p className="text-center text-gray-500">Made by Sagar with ❤️</p>
     </AppLayout>
   )
 }

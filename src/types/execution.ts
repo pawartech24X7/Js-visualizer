@@ -46,16 +46,23 @@ export interface StackFrame {
   arguments: RuntimeValue[]
 }
 
+export interface EnvironmentRecord {
+  id: string
+  type: 'global' | 'function' | 'block' | 'module'
+  bindings: Record<string, RuntimeValue & { initialized?: boolean }> // Add TDZ tracking
+  outer: EnvironmentRecord | null // Reference to outer lexical environment
+}
+
 export interface ExecutionContext {
   id: string
-  type: 'global' | 'function' | 'block'
+  type: 'global' | 'function' | 'block' | 'eval'
   name: string
   parentId: string | null
-  variableEnvironment: Record<string, RuntimeValue>
-  lexicalEnvironment: Record<string, RuntimeValue>
+  variableEnvironment: EnvironmentRecord // For var declarations (hoisted)
+  lexicalEnvironment: EnvironmentRecord // For let/const and scope chain
   thisBinding: RuntimeValue
-  outerEnvironmentRef: string | null
   hoistedDeclarations: string[]
+  tdzVariables: Set<string> // Track TDZ variables
 }
 
 export interface RuntimeValue {
@@ -92,8 +99,8 @@ export interface HeapObject {
   functionName?: string
   functionParams?: string[]
   functionBody?: string
-  functionAst?: any // Add this to store function node for execution
-  closureContextId?: string | null // Reference to parent scope
+  functionAst?: Node // Add this to store function node for execution
+  capturedEnvironment: EnvironmentRecord | null // Reference to captured lexical environment (closure)
   referenceCount: number
   createdAtStep: number
 }
