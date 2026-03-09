@@ -26,7 +26,7 @@ const categories: TopicCategory[] = [
 
 export function Sidebar() {
   const { topics, expandedCategories, toggleCategory } = useContentStore()
-  const { selectTopic, selectedTopicId } = useUIStore()
+  const { selectTopic, selectedTopicId ,setViewMode } = useUIStore()
 
   return (
     <div className="h-full overflow-y-auto p-4">
@@ -65,7 +65,7 @@ export function Sidebar() {
                   {categoryTopics.map((topic) => (
                     <button
                       key={topic.id}
-                      onClick={() => selectTopic(topic.id)}
+                      onClick={() =>{ selectTopic(topic.id); setViewMode('topics');}}
                       className={`
                         w-full text-left px-3 py-1.5 rounded-md text-sm transition-colors
                         ${selectedTopicId === topic.id

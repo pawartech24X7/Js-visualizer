@@ -27,7 +27,7 @@ interface ExecutionState {
   clearConsole: () => void
 }
 
-const DEFAULT_CODE = `// JavaScript Visualizer - Try these examples!
+const DEFAULT_CODE = `// Default code \n// JavaScript Visualizer - Try these examples!
 // Example 1: Basic Variables and Hoisting
 var message = "Hello";
 let count = 42;
