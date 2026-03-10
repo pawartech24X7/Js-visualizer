@@ -26,7 +26,7 @@ function App() {
       sidebar={<Sidebar />}
     >
       {renderContent()}
-      <p className="text-center text-gray-500">version 1.0.0</p>
+      <p className="text-center text-gray-500">version 1.0.1</p>
       <p className="text-center text-gray-500">Made by Sagar with ❤️</p>
       <p className="text-center text-gray-500">All rights reserved.</p>
     </AppLayout>

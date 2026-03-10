@@ -14,13 +14,15 @@
 
 import { runAllTests, generateReport } from './test-runner'
 import { testSuite } from './test-suite'
+import { defectFixesTestSuite } from './defect-fixes-test-suite'
 
 // Run all tests
 console.log('\n' + '='.repeat(80))
 console.log('JAVASCRIPT INTERPRETER STRESS TEST')
 console.log('='.repeat(80) + '\n')
 
-const allPassed = runAllTests(testSuite)
+const combinedTestSuite = [...testSuite, ...defectFixesTestSuite]
+const allPassed = runAllTests(combinedTestSuite)
 
 // Exit with appropriate code (browser-compatible)
 if (!allPassed) {

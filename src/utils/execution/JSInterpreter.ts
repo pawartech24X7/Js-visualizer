@@ -13,7 +13,7 @@ import type {
   EventLoopPhase,
   ExecutionPhase,
   ExecutionAction,
- EnvironmentRecord,
+  EnvironmentRecord,
 } from '@/types'
 import * as acorn from 'acorn'
 import type { Node, Program } from 'acorn'
@@ -23,6 +23,17 @@ let heapIdCounter = 0
 let contextIdCounter = 0
 let taskIdCounter = 0
 let envIdCounter = 0
+let currentMaxSteps = 1000
+
+const DEFAULT_MAX_STEPS = 1000
+const DEFAULT_MAX_RECURSION_DEPTH = 50
+const DEFAULT_MAX_LOOP_ITERATIONS = 500
+
+export interface InterpreterOptions {
+  maxSteps?: number
+  maxRecursionDepth?: number
+  maxLoopIterations?: number
+}
 
 function generateId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
@@ -34,6 +45,7 @@ function resetCounters(): void {
   contextIdCounter = 0
   taskIdCounter = 0
   envIdCounter = 0
+  currentMaxSteps = DEFAULT_MAX_STEPS
 }
 
 interface InterpreterState {
@@ -69,12 +81,38 @@ function createRuntimeValue(value: unknown): RuntimeValue {
 }
 
 function cloneState(state: InterpreterState): InterpreterState {
+  // Deep clone environment to preserve state at this snapshot
+  // But we need to maintain the reference structure (outer pointers)
+  // This is tricky because JSON.parse(JSON.stringify) breaks references
+  // and shallow copy shares mutations.
+
+  // For the visualizer, we want a snapshot.
+  // We can't easily clone the entire graph of environments perfectly.
+  // But for simple closures, we just need to make sure bindings are snapshotted.
+
+  const cloneEnv = (env: EnvironmentRecord): EnvironmentRecord => {
+    // If outer exists, we should technically clone it too recursively?
+    // No, because that would duplicate the chain.
+    // The issue is that if we mutate outer env later, this snapshot sees it.
+
+    // For a perfect time-travel debugger, we need structural sharing or full copy.
+    // Let's do a shallow copy of bindings, which is what we have.
+    // The problem in TEST 1 is likely that the captured environment in heap
+    // is being mutated in place, and we are seeing the final state?
+    // No, TEST 1 fails because it returns undefined, not because of visualization.
+
+    return {
+      ...env,
+      bindings: { ...env.bindings },
+    }
+  }
+
   return {
     callStack: state.callStack.map((f) => ({ ...f, arguments: [...f.arguments] })),
     executionContexts: state.executionContexts.map((ctx) => ({
       ...ctx,
-      variableEnvironment: { ...ctx.variableEnvironment },
-      lexicalEnvironment: { ...ctx.lexicalEnvironment },
+      variableEnvironment: cloneEnv(ctx.variableEnvironment),
+      lexicalEnvironment: cloneEnv(ctx.lexicalEnvironment),
       hoistedDeclarations: [...ctx.hoistedDeclarations],
       tdzVariables: new Set(ctx.tdzVariables),
     })),
@@ -84,7 +122,7 @@ function cloneState(state: InterpreterState): InterpreterState {
       properties: { ...h.properties },
       arrayElements: h.arrayElements ? [...h.arrayElements] : undefined,
       functionParams: h.functionParams ? [...h.functionParams] : undefined,
-     capturedEnvironment: h.capturedEnvironment ? { ...h.capturedEnvironment } : null,
+      capturedEnvironment: h.capturedEnvironment, // Use reference
     })),
     webApis: state.webApis.map((w) => ({ ...w })),
     microTaskQueue: state.microTaskQueue.map((m) => ({ ...m })),
@@ -111,9 +149,14 @@ function createStep(
   line: number,
   column: number
 ): ExecutionStep {
+  if (stepCounter >= currentMaxSteps) {
+    throw new Error(`Execution limit reached: ${currentMaxSteps} steps`)
+  }
   stepCounter++
   const clonedState = cloneState(state)
 
+  // Use the same ID generation logic as interpret function if possible
+  // but ensure it's consistent within the step
   return {
     stepNumber: stepCounter,
     timestamp: Date.now(),
@@ -125,7 +168,7 @@ function createStep(
     currentColumn: column,
     callStack: clonedState.callStack,
     executionContexts: clonedState.executionContexts,
-    activeContextId: clonedState.currentContextId,
+    activeContextId: state.currentContextId, // Use state instead of clonedState to be safe
     memoryStack: clonedState.memoryStack,
     memoryHeap: clonedState.memoryHeap,
     webApis: clonedState.webApis,
@@ -138,64 +181,70 @@ function createStep(
 }
 
 function createGlobalContext(): ExecutionContext {
-  contextIdCounter++
- const globalEnv: EnvironmentRecord = {
+  const globalEnv: EnvironmentRecord = {
     id: `env-global`,
     type: 'global',
-   bindings: {},
-  outer: null,
+    bindings: {},
+    outer: null,
   }
-  
- return {
+
+  return {
     id: `ctx-global`,
     type: 'global',
     name: 'Global',
-   parentId: null,
-   variableEnvironment: globalEnv,
-   lexicalEnvironment: globalEnv,
-  thisBinding: { type: 'object', value: 'window' },
-  hoistedDeclarations: [],
-  tdzVariables: new Set(),
+    parentId: null,
+    variableEnvironment: globalEnv,
+    lexicalEnvironment: globalEnv,
+    thisBinding: { type: 'object', value: 'window' },
+    hoistedDeclarations: [],
+    tdzVariables: new Set(),
   }
 }
 
-function createFunctionContext(name: string, outerEnv: EnvironmentRecord | null): ExecutionContext {
+function createFunctionContext(
+  name: string,
+  outerEnv: EnvironmentRecord | null,
+  parentId: string | null
+): ExecutionContext {
   contextIdCounter++
-  
+
   // Create function-level lexical and variable environments
   const funcVarEnv: EnvironmentRecord = {
     id: `env-var-func-${contextIdCounter}`,
     type: 'function',
-   bindings: {},
-  outer: outerEnv, // Set captured environment as outer reference
+    bindings: {},
+    outer: outerEnv, // Set captured environment as outer reference
   }
-  
+
   const funcLexEnv: EnvironmentRecord = {
     id: `env-lex-func-${contextIdCounter}`,
     type: 'function',
-   bindings: {},
-  outer: outerEnv,
+    bindings: {},
+    outer: outerEnv,
   }
-  
- return {
+
+  const ctx: ExecutionContext = {
     id: `ctx-${contextIdCounter}`,
     type: 'function',
     name,
-   parentId: null,
-   variableEnvironment: funcVarEnv,
-   lexicalEnvironment: funcLexEnv,
-  thisBinding: { type: 'undefined', value: undefined },
-  hoistedDeclarations: [],
-  tdzVariables: new Set(),
+    parentId, // Track parent
+    variableEnvironment: funcVarEnv,
+    lexicalEnvironment: funcLexEnv,
+    thisBinding: { type: 'undefined', value: undefined },
+    hoistedDeclarations: [],
+    tdzVariables: new Set(),
   }
+
+  return ctx
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyNode = any
 
-export function interpret(sourceCode: string): ExecutionStep[] {
+export function interpret(sourceCode: string, options: InterpreterOptions = {}): ExecutionStep[] {
   resetCounters()
   const steps: ExecutionStep[] = []
+  currentMaxSteps = options.maxSteps || DEFAULT_MAX_STEPS
 
   let ast: Program
   try {
@@ -268,21 +317,51 @@ export function interpret(sourceCode: string): ExecutionStep[] {
     virtualTime: 0,
   }
 
-  // Initial step
-  steps.push(
-    createStep(state, ast, 'creation', 'push-context', 'Creating Global Execution Context', 1, 0)
-  )
+  try {
+    // Initial step
+    steps.push(
+      createStep(state, ast, 'creation', 'push-context', 'Creating Global Execution Context', 1, 0)
+    )
 
-  // Creation phase - hoist declarations
-  hoistDeclarations(ast, state, globalContext, steps)
+    // Creation phase - hoist declarations
+    hoistDeclarations(ast, state, globalContext, steps)
 
-  // Execution phase - execute statements
-  for (const node of ast.body) {
-    executeNode(node, state, steps, sourceCode)
+    // Execution phase - execute statements
+    for (const node of ast.body) {
+      executeNode(node, state, steps, sourceCode)
+    }
+
+    // Process async tasks (event loop)
+    processEventLoop(state, steps)
+  } catch (error) {
+    // Log the error to console
+    const errorEntry: ConsoleEntry = {
+      id: generateId('console'),
+      type: 'error',
+      args: [
+        {
+          type: 'string',
+          value: `${error instanceof Error ? error.message : 'Unknown error'}`,
+        },
+      ],
+      timestamp: Date.now(),
+      stepNumber: stepCounter + 1,
+    }
+    state.consoleOutput.push(errorEntry)
+
+    // Add an error step
+    steps.push(
+      createStep(
+        state,
+        null,
+        'execution',
+        'event-loop-tick',
+        `Runtime Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        1,
+        0
+      )
+    )
   }
-
-  // Process async tasks (event loop)
-  processEventLoop(state, steps)
 
   // Final step - program complete
   state.callStack = []
@@ -319,17 +398,52 @@ function hoistDeclarations(
   if (!context || !bodyNode.body) return
 
   const nodes = Array.isArray(bodyNode.body) ? bodyNode.body : [bodyNode.body]
- const varEnv = context.variableEnvironment
+  const varEnv = context.variableEnvironment
 
+  // PASS 1: Hoist all variable declarations (var, let, const)
+  for (const node of nodes) {
+    if (node.type === 'VariableDeclaration') {
+      const varNode = node as AnyNode
+      if (varNode.kind === 'var') {
+        for (const decl of varNode.declarations) {
+          const name = decl.id?.name || 'unknown'
+          varEnv.bindings[name] = {
+            type: 'undefined',
+            value: undefined,
+            initialized: true,
+          }
+          context.hoistedDeclarations.push(name)
+          state.memoryStack.push({
+            id: generateId('mem'),
+            variableName: name,
+            scopeId: context.id,
+            type: 'primitive',
+            value: { type: 'undefined', value: undefined },
+          })
+        }
+      } else if (varNode.kind === 'let' || varNode.kind === 'const') {
+        for (const decl of varNode.declarations) {
+          const name = decl.id?.name || 'unknown'
+          context.lexicalEnvironment.bindings[name] = {
+            type: 'undefined',
+            value: undefined,
+            initialized: false,
+          }
+          context.hoistedDeclarations.push(name)
+        }
+      }
+    }
+  }
+
+  // PASS 2: Hoist all function declarations (and capture the environment with variables)
   for (const node of nodes) {
     if (node.type === 'FunctionDeclaration') {
-   const funcNode = node as AnyNode
-   const name = funcNode.id?.name || 'anonymous'
+      const funcNode = node as AnyNode
+      const name = funcNode.id?.name || 'anonymous'
 
-      // Create heap object for function with captured environment
       heapIdCounter++
-    const heapId = `heap-${heapIdCounter}`
-    const funcHeapObj: HeapObject = {
+      const heapId = `heap-${heapIdCounter}`
+      const funcHeapObj: HeapObject = {
         id: heapId,
         type: 'function',
         properties: {},
@@ -337,23 +451,21 @@ function hoistDeclarations(
         functionParams: funcNode.params?.map((p: AnyNode) => p.name) || [],
         functionBody: 'function body',
         functionAst: funcNode.body,
-        capturedEnvironment: context.lexicalEnvironment, // Capture current lexical environment
+        capturedEnvironment: context.lexicalEnvironment,
         referenceCount: 1,
-    createdAtStep: stepCounter,
+        createdAtStep: stepCounter,
       }
-   state.memoryHeap.push(funcHeapObj)
+      state.memoryHeap.push(funcHeapObj)
 
-      // Add to variable environment (hoisted)
-     varEnv.bindings[name] = {
+      varEnv.bindings[name] = {
         type: 'function',
         value: name,
         heapId,
         initialized: true,
       }
-    context.hoistedDeclarations.push(name)
+      context.hoistedDeclarations.push(name)
 
-      // Add to memory stack
-    state.memoryStack.push({
+      state.memoryStack.push({
         id: generateId('mem'),
         variableName: name,
         scopeId: context.id,
@@ -362,9 +474,9 @@ function hoistDeclarations(
         heapReferenceId: heapId,
       })
 
-    steps.push(
-      createStep(
-        state,
+      steps.push(
+        createStep(
+          state,
           node,
           'creation',
           'hoisting',
@@ -373,41 +485,6 @@ function hoistDeclarations(
           getNodeColumn(node)
         )
       )
-    } else if (node.type === 'VariableDeclaration') {
-   const varNode = node as AnyNode
-      if (varNode.kind === 'var') {
-        for (const decl of varNode.declarations) {
-       const name = decl.id?.name || 'unknown'
-
-          // Hoist var to variable environment
-          varEnv.bindings[name] = {
-            type: 'undefined',
-            value: undefined,
-           initialized: true, // var is initialized during creation
-          }
-        context.hoistedDeclarations.push(name)
-
-        state.memoryStack.push({
-            id: generateId('mem'),
-            variableName: name,
-            scopeId: context.id,
-            type: 'primitive',
-            value: { type: 'undefined', value: undefined },
-          })
-
-        steps.push(
-          createStep(
-            state,
-              node,
-              'creation',
-              'hoisting',
-              `Hoisting var declaration: ${name} = undefined`,
-              getNodeLine(node),
-              getNodeColumn(node)
-            )
-          )
-        }
-      }
     }
   }
 }
@@ -436,6 +513,9 @@ function executeNode(
       return { type: 'undefined', value: undefined }
 
     case 'AssignmentExpression':
+      if (node.left.type === 'MemberExpression') {
+        return executeMemberAssignment(node, state, steps, sourceCode)
+      }
       return executeAssignment(node, state, steps, context)
 
     case 'BinaryExpression':
@@ -444,8 +524,10 @@ function executeNode(
     case 'Literal':
       return createRuntimeValue(node.value)
 
-    case 'Identifier':
-      return resolveIdentifier(node.name, state)
+    case 'Identifier': {
+      const result = resolveIdentifier(node.name, state)
+      return result
+    }
 
     case 'MemberExpression':
       return evaluateMemberExpression(node, state, steps, sourceCode)
@@ -467,6 +549,12 @@ function executeNode(
       }
       return { type: 'undefined', value: undefined, isReturn: true }
 
+    case 'BreakStatement':
+      return { type: 'undefined', value: undefined, isBreak: true }
+
+    case 'ContinueStatement':
+      return { type: 'undefined', value: undefined, isContinue: true }
+
     case 'IfStatement': {
       const result = executeIfStatement(node, state, steps, sourceCode)
       return result
@@ -475,31 +563,46 @@ function executeNode(
     case 'ForStatement':
       return executeForStatement(node, state, steps, sourceCode)
 
+    case 'ForOfStatement':
+      return executeForOfStatement(node, state, steps, sourceCode)
+
+    case 'ForInStatement':
+      return executeForInStatement(node, state, steps, sourceCode)
+
     case 'WhileStatement':
       return executeWhileStatement(node, state, steps, sourceCode)
 
+    case 'TryStatement':
+      return executeTryStatement(node, state, steps, sourceCode)
+
+    case 'SwitchStatement':
+      return executeSwitchStatement(node, state, steps, sourceCode)
+
+    case 'AwaitExpression':
+      return executeAwaitExpression(node, state, steps, sourceCode)
+
     case 'BlockStatement': {
       // CRITICAL FIX: Create new block-level lexical environment for let/const
-     const context = getCurrentContext(state)
+      const context = getCurrentContext(state)
       if (context) {
         // Save current lexical environment
-       const outerEnv = context.lexicalEnvironment
-        
+        const outerEnv = context.lexicalEnvironment
+
         // Create new block environment
         envIdCounter++
-       const blockEnv: EnvironmentRecord = {
+        const blockEnv: EnvironmentRecord = {
           id: `env-block-${envIdCounter}`,
           type: 'block',
-         bindings: {},
-         outer: outerEnv,
+          bindings: {},
+          outer: outerEnv,
         }
-        
-        // Set as current lexical environment
-       context.lexicalEnvironment = blockEnv
 
-       steps.push(
-       createStep(
-         state,
+        // Set as current lexical environment
+        context.lexicalEnvironment = blockEnv
+
+        steps.push(
+          createStep(
+            state,
             node,
             'execution',
             'create-object',
@@ -510,25 +613,46 @@ function executeNode(
         )
 
         let lastVal: RuntimeValue = { type: 'undefined', value: undefined }
-        for (const stmt of node.body) {
+        for (let i = 0; i < node.body.length; i++) {
+          const stmt = node.body[i]
           lastVal = executeNode(stmt, state, steps, sourceCode)
-          if (lastVal.isReturn) {
-            // Restore environment before returning
-           context.lexicalEnvironment = outerEnv
+
+          if (lastVal.isAwait) {
+            // Handle await continuation
+            taskIdCounter++
+            const microtask: MicroTask = {
+              id: `microtask-${taskIdCounter}`,
+              type: 'promise-then',
+              callbackName: 'async continuation',
+              createdAtStep: stepCounter + 1,
+              isContinuation: true,
+              remainingStatements: node.body.slice(i + 1),
+              contextToResume: context.id,
+            }
+            state.microTaskQueue.push(microtask)
+
+            // Restore environment before suspending
+            context.lexicalEnvironment = outerEnv
+            return lastVal
+          }
+
+          if (lastVal.isReturn || lastVal.isBreak || lastVal.isContinue) {
+            // Restore environment before returning, breaking or continuing
+            context.lexicalEnvironment = outerEnv
             return lastVal
           }
         }
 
         // Destroy block environment when exiting block
-       context.lexicalEnvironment = outerEnv
+        context.lexicalEnvironment = outerEnv
         return lastVal
       }
-      
+
       // Fallback if no context
       let lastVal: RuntimeValue = { type: 'undefined', value: undefined }
       for (const stmt of node.body) {
         lastVal = executeNode(stmt, state, steps, sourceCode)
-        if (lastVal.isReturn) return lastVal
+        if (lastVal.isReturn || lastVal.isBreak || lastVal.isContinue) return lastVal
       }
       return lastVal
     }
@@ -551,7 +675,7 @@ function executeNode(
       return evaluateUnaryExpression(node, state, steps, sourceCode)
 
     case 'UpdateExpression':
-      return evaluateUpdateExpression(node, state, context)
+      return evaluateUpdateExpression(node, state)
 
     default:
       return { type: 'undefined', value: undefined }
@@ -576,29 +700,29 @@ function executeVariableDeclaration(
 
     // For var, update existing hoisted declaration
     if (kind === 'var') {
-    const existingSlot = state.memoryStack.find(
+      const existingSlot = state.memoryStack.find(
         (s) => s.variableName === name && s.scopeId === context.id
       )
       if (existingSlot) {
-       existingSlot.value = value
+        existingSlot.value = value
         existingSlot.type = value.heapId ? 'reference' : 'primitive'
         existingSlot.heapReferenceId = value.heapId
       }
-   context.variableEnvironment.bindings[name] = value
+      context.variableEnvironment.bindings[name] = value
     } else {
       // let/const go to lexical environment with TDZ tracking
-   const isInitialized = !!decl.init
-      
-   context.lexicalEnvironment.bindings[name] = {
-       ...value,
-       initialized: isInitialized,
-     }
-      
-     if (!isInitialized) {
-     context.tdzVariables.add(name)
-     }
-      
-   state.memoryStack.push({
+      const isInitialized = decl.init !== null
+
+      context.lexicalEnvironment.bindings[name] = {
+        ...value,
+        initialized: isInitialized,
+      }
+
+      if (!isInitialized) {
+        context.tdzVariables.add(name)
+      }
+
+      state.memoryStack.push({
         id: generateId('mem'),
         variableName: name,
         scopeId: context.id,
@@ -625,6 +749,146 @@ function executeVariableDeclaration(
   return { type: 'undefined', value: undefined }
 }
 
+function executeFunction(
+  funcValue: RuntimeValue,
+  funcName: string,
+  args: RuntimeValue[],
+  state: InterpreterState,
+  steps: ExecutionStep[],
+  node: AnyNode | null,
+  sourceCode: string
+): RuntimeValue {
+  if (funcValue.type !== 'function' || !funcValue.heapId)
+    return { type: 'undefined', value: undefined }
+
+  const heapObj = state.memoryHeap.find((h) => h.id === funcValue.heapId)
+  if (!heapObj || !heapObj.functionAst) return { type: 'undefined', value: undefined }
+
+  if (state.callStack.length >= DEFAULT_MAX_RECURSION_DEPTH) {
+    throw new Error(`Maximum recursion depth reached: ${DEFAULT_MAX_RECURSION_DEPTH}`)
+  }
+
+  // Create new execution context with captured environment as outer
+  const capturedEnv = heapObj.capturedEnvironment
+  const newContext = createFunctionContext(funcName, capturedEnv, state.currentContextId)
+  state.executionContexts.push(newContext)
+
+  // Map parameters to arguments
+  if (heapObj.functionParams) {
+    heapObj.functionParams.forEach((paramName, index) => {
+      const val = args[index] || { type: 'undefined', value: undefined }
+      newContext.lexicalEnvironment.bindings[paramName] = { ...val, initialized: true }
+      state.memoryStack.push({
+        id: generateId('mem'),
+        variableName: paramName,
+        scopeId: newContext.id,
+        type: val.heapId ? 'reference' : 'primitive',
+        value: val,
+        heapReferenceId: val.heapId,
+      })
+    })
+  }
+
+  // Push to call stack
+  const frame: StackFrame = {
+    id: generateId('frame'),
+    functionName: funcName,
+    line: node ? getNodeLine(node) : 1,
+    column: node ? getNodeColumn(node) : 0,
+    executionContextId: newContext.id,
+    arguments: args,
+  }
+  state.callStack.push(frame)
+
+  const prevContextId = state.currentContextId
+  state.currentContextId = newContext.id
+
+  // Hoist declarations inside function
+  hoistDeclarations(heapObj.functionAst, state, newContext, steps)
+
+  steps.push(
+    createStep(
+      state,
+      node,
+      node ? 'execution' : 'async',
+      'call-function',
+      `Calling function: ${funcName}(${args.map((a) => formatValue(a)).join(', ')})`,
+      node ? getNodeLine(node) : 1,
+      node ? getNodeColumn(node) : 0
+    )
+  )
+
+  // Execute function body
+  let result: RuntimeValue
+  if (heapObj.functionAst.type === 'BlockStatement') {
+    let lastVal: RuntimeValue = { type: 'undefined', value: undefined }
+    const functionAst = heapObj.functionAst as any
+    for (let i = 0; i < functionAst.body.length; i++) {
+      const stmt = functionAst.body[i]
+      lastVal = executeNode(stmt, state, steps, sourceCode)
+
+      if (lastVal.isAwait) {
+        // Handle await continuation
+        taskIdCounter++
+        const microtask: MicroTask = {
+          id: `microtask-${taskIdCounter}`,
+          type: 'promise-then',
+          callbackName: 'async continuation',
+          createdAtStep: stepCounter + 1,
+          isContinuation: true,
+          remainingStatements: functionAst.body.slice(i + 1),
+          contextToResume: newContext.id,
+        }
+        state.microTaskQueue.push(microtask)
+
+        // Return suspended
+        state.callStack.pop()
+        state.currentContextId = prevContextId
+        return lastVal
+      }
+
+      if (lastVal.isReturn) break
+    }
+    result = lastVal
+  } else {
+    // Arrow function with expression body
+    result = executeNode(heapObj.functionAst, state, steps, sourceCode)
+    result = { ...result, isReturn: true }
+  }
+
+  if (result.isAwait) {
+    // If we're inside an async function, we need to handle the continuation
+    // But for now, we just stop synchronous execution of this function
+    state.callStack.pop()
+    state.currentContextId = prevContextId
+    return result
+  }
+
+  // Unwrap return
+  let finalResult = result
+  if (result.isReturn) {
+    finalResult = { ...result, isReturn: false }
+  }
+
+  // Pop from call stack and restore context
+  state.callStack.pop()
+  state.currentContextId = prevContextId
+
+  steps.push(
+    createStep(
+      state,
+      node,
+      node ? 'execution' : 'async',
+      'return-function',
+      `Function ${funcName} returned ${formatValue(finalResult)}`,
+      node ? getNodeLine(node) : 1,
+      node ? getNodeColumn(node) : 0
+    )
+  )
+
+  return finalResult
+}
+
 function executeCallExpression(
   node: AnyNode,
   state: InterpreterState,
@@ -633,16 +897,35 @@ function executeCallExpression(
 ): RuntimeValue {
   // Handle console.log, setTimeout, Promise, etc.
   if (node.callee.type === 'MemberExpression') {
-    const obj = node.callee.object
+    const objNode = node.callee.object
     const prop = node.callee.property
+    const method = prop.name
 
-    if (obj.type === 'Identifier' && obj.name === 'console') {
-      return executeConsoleMethod(node, prop.name, state, steps, sourceCode)
+    // Evaluate the object first
+    const objValue = executeNode(objNode, state, steps, sourceCode)
+
+    // Handle console.log
+    if (objNode.type === 'Identifier' && objNode.name === 'console') {
+      return executeConsoleMethod(node, method, state, steps, sourceCode)
     }
 
-    if (obj.type === 'Identifier' && obj.name === 'Promise') {
-      return executePromiseMethod(node, prop.name, state, steps, sourceCode)
+    // Handle Promise methods (resolve, reject, all, etc. on Promise constructor)
+    if (objNode.type === 'Identifier' && objNode.name === 'Promise') {
+      return executePromiseMethod(node, method, state, steps, sourceCode, null)
     }
+
+    // Handle Promise instance methods (then, catch, finally)
+    const isPromise =
+      objValue.type === 'object' &&
+      objValue.heapId &&
+      state.memoryHeap.find((h) => h.id === objValue.heapId)?.properties['[[PromiseState]]']
+
+    if (isPromise) {
+      return executePromiseMethod(node, method, state, steps, sourceCode, objValue)
+    }
+
+    // Fallback for other member expression calls (methods on objects/arrays)
+    // ...
   }
 
   // Handle setTimeout, setInterval
@@ -650,6 +933,10 @@ function executeCallExpression(
     const name = node.callee.name
 
     if (name === 'setTimeout') {
+      return executeSetTimeout(node, state, steps, sourceCode)
+    }
+
+    if (name === 'setInterval') {
       return executeSetTimeout(node, state, steps, sourceCode)
     }
 
@@ -678,110 +965,7 @@ function executeCallExpression(
     executeNode(arg, state, steps, sourceCode)
   )
 
-  if (funcValue.type === 'function' && funcValue.heapId) {
-    const heapObj = state.memoryHeap.find((h) => h.id === funcValue.heapId)
-    if (heapObj && heapObj.functionAst) {
-      // CRITICAL FIX: Use captured environment for function's outer lexical environment
-    const capturedEnv = heapObj.capturedEnvironment
-      
-      // Create new execution context with captured environment as outer
-    const newContext = createFunctionContext(funcName, capturedEnv)
-    state.executionContexts.push(newContext)
-
-      // Map parameters to arguments
-      if (heapObj.functionParams) {
-       heapObj.functionParams.forEach((paramName, index) => {
-        const val = args[index] || { type: 'undefined', value: undefined }
-         newContext.lexicalEnvironment.bindings[paramName] = val
-         state.memoryStack.push({
-            id: generateId('mem'),
-            variableName: paramName,
-            scopeId: newContext.id,
-            type: val.heapId ? 'reference' : 'primitive',
-            value: val,
-            heapReferenceId: val.heapId,
-          })
-        })
-      }
-
-      // Push to call stack
-      const frame: StackFrame = {
-        id: generateId('frame'),
-        functionName: funcName,
-        line: getNodeLine(node),
-        column: getNodeColumn(node),
-        executionContextId: newContext.id,
-        arguments: args,
-      }
-      state.callStack.push(frame)
-
-      const prevContextId = state.currentContextId
-      state.currentContextId = newContext.id
-
-      // Hoist declarations inside function
-      hoistDeclarations(heapObj.functionAst, state, newContext, steps)
-
-      steps.push(
-        createStep(
-          state,
-          node,
-          'execution',
-          'call-function',
-          `Calling function: ${funcName}(${args.map((a) => formatValue(a)).join(', ')})`,
-          getNodeLine(node),
-          getNodeColumn(node)
-        )
-      )
-
-      // Execute function body
-      let result: RuntimeValue
-      if (heapObj.functionAst.type === 'BlockStatement') {
-        result = executeNode(heapObj.functionAst, state, steps, sourceCode)
-      } else {
-        // Arrow function with expression body - wrap result as if it was returned
-        result = executeNode(heapObj.functionAst, state, steps, sourceCode)
-        result = { ...result, isReturn: true }
-      }
-
-      // If it was a return, unwrap it
-      if (result.isReturn) {
-        result = { ...result, isReturn: false }
-      }
-
-      // Pop from call stack and restore context
-      state.callStack.pop()
-      state.currentContextId = prevContextId
-
-      steps.push(
-        createStep(
-          state,
-          node,
-          'execution',
-          'return-function',
-          `Function ${funcName} returned ${formatValue(result)}`,
-          getNodeLine(node),
-          getNodeColumn(node)
-        )
-      )
-
-      return result
-    }
-  }
-
-  // Fallback for native/unknown functions
-  steps.push(
-    createStep(
-      state,
-      node,
-      'execution',
-      'call-function',
-      `Calling function: ${funcName}(${args.map((a) => formatValue(a)).join(', ')})`,
-      getNodeLine(node),
-      getNodeColumn(node)
-    )
-  )
-
-  return { type: 'undefined', value: undefined }
+  return executeFunction(funcValue, funcName, args, state, steps, node, sourceCode)
 }
 
 function executeConsoleMethod(
@@ -829,44 +1013,45 @@ function executeSetTimeout(
   steps: ExecutionStep[],
   sourceCode: string
 ): RuntimeValue {
-  const callback = node.arguments[0]
-  const delay = node.arguments[1]
-    ? executeNode(node.arguments[1], state, steps, sourceCode)
-    : { type: 'number', value: 0 }
+  const callbackNode = node.arguments[0]
+  const delayNode = node.arguments[1]
 
-  let callbackName = 'anonymous'
-  if (callback?.type === 'Identifier') {
-    callbackName = callback.name
-  } else if (callback?.type === 'FunctionExpression' && callback.id) {
-    callbackName = callback.id.name
-  } else if (
-    callback?.type === 'FunctionExpression' ||
-    callback?.type === 'ArrowFunctionExpression'
-  ) {
-    callbackName = 'callback'
-  }
+  const callbackValue = executeNode(callbackNode, state, steps, sourceCode)
+  const delay = delayNode ? executeNode(delayNode, state, steps, sourceCode).value : 0
 
+  const callbackName =
+    callbackNode.type === 'Identifier'
+      ? callbackNode.name
+      : callbackNode.type === 'ArrowFunctionExpression' ||
+          callbackNode.type === 'FunctionExpression'
+        ? 'anonymous'
+        : 'callback'
+
+  // Add to Web APIs
   taskIdCounter++
-  const task: WebApiTask = {
-    id: `webapi-${taskIdCounter}`,
+  const webApiTaskId = `webapi-${taskIdCounter}`
+  const webApi: WebApiTask = {
+    id: webApiTaskId,
     apiName: 'setTimeout',
-    callbackId: generateId('callback'),
-    callbackName,
-    delay: typeof delay.value === 'number' ? delay.value : 0,
-    startTime: state.virtualTime,
-    remainingTime: typeof delay.value === 'number' ? delay.value : 0,
     status: 'pending',
+    delay: Number(delay),
+    startTime: Date.now(),
+    remainingTime: Number(delay),
     createdAtStep: stepCounter + 1,
+    callbackId: `callback-${taskIdCounter}`,
+    callbackName,
+    callbackAst: callbackNode, // Keep for visualization
+    callbackValue, // Store the actual function value
   }
-  state.webApis.push(task)
+  state.webApis.push(webApi)
 
   steps.push(
     createStep(
       state,
       node,
       'execution',
-      'schedule-timeout',
-      `setTimeout(${callbackName}, ${delay.value}ms) → Web API`,
+      'call-webapi',
+      `setTimeout queued: ${callbackName} in ${delay}ms`,
       getNodeLine(node),
       getNodeColumn(node)
     )
@@ -896,19 +1081,19 @@ function executePromiseConstructor(
   state.promises.push(promise)
 
   heapIdCounter++
- const heapId = `heap-${heapIdCounter}`
- const promiseHeap: HeapObject = {
+  const heapId = `heap-${heapIdCounter}`
+  const promiseHeap: HeapObject = {
     id: heapId,
     type: 'object',
-   properties: {
-     '[[PromiseState]]': { type: 'string', value: 'pending' },
-     '[[PromiseResult]]': { type: 'undefined', value: undefined },
-   },
- referenceCount: 1,
-  createdAtStep: stepCounter +1,
-  capturedEnvironment: null, // Promises don't capture environment
- }
- state.memoryHeap.push(promiseHeap)
+    properties: {
+      '[[PromiseState]]': { type: 'string', value: 'pending' },
+      '[[PromiseResult]]': { type: 'undefined', value: undefined },
+    },
+    referenceCount: 1,
+    createdAtStep: stepCounter + 1,
+    capturedEnvironment: null, // Promises don't capture environment
+  }
+  state.memoryHeap.push(promiseHeap)
 
   steps.push(
     createStep(
@@ -947,114 +1132,187 @@ function executePromiseMethod(
   method: string,
   state: InterpreterState,
   steps: ExecutionStep[],
-  sourceCode: string
+  sourceCode: string,
+  objValue: RuntimeValue | null
 ): RuntimeValue {
   if (method === 'resolve') {
-   const value: RuntimeValue = node.arguments[0]
+    const value: RuntimeValue = node.arguments[0]
       ? executeNode(node.arguments[0], state, steps, sourceCode)
       : { type: 'undefined', value: undefined }
 
-   taskIdCounter++
-  const promiseId = `promise-${taskIdCounter}`
+    taskIdCounter++
+    const promiseId = `promise-${taskIdCounter}`
 
-  const promise: PromiseState = {
-     id: promiseId,
-     label: `Promise.resolve`,
-    status: 'fulfilled',
-     value,
-   thenHandlers: [],
-     catchHandlers: [],
-     finallyHandlers: [],
-   createdAtStep: stepCounter +1,
-    resolvedAtStep: stepCounter + 1,
+    const promise: PromiseState = {
+      id: promiseId,
+      label: `Promise.resolve`,
+      status: 'fulfilled',
+      value,
+      thenHandlers: [],
+      catchHandlers: [],
+      finallyHandlers: [],
+      createdAtStep: stepCounter + 1,
+      resolvedAtStep: stepCounter + 1,
     }
-  state.promises.push(promise)
+    state.promises.push(promise)
 
-  steps.push(
-   createStep(
-    state,
-       node,
-       'execution',
-       'create-promise',
-       `Promise.resolve(${formatValue(value)})`,
-       getNodeLine(node),
-       getNodeColumn(node)
-     )
-   )
+    steps.push(
+      createStep(
+        state,
+        node,
+        'execution',
+        'create-promise',
+        `Promise.resolve(${formatValue(value)})`,
+        getNodeLine(node),
+        getNodeColumn(node)
+      )
+    )
 
     heapIdCounter++
-  const heapId = `heap-${heapIdCounter}`
- const promiseHeap: HeapObject = {
+    const heapId = `heap-${heapIdCounter}`
+    const promiseHeap: HeapObject = {
       id: heapId,
       type: 'object',
       properties: {
         '[[PromiseState]]': { type: 'string', value: 'fulfilled' } as RuntimeValue,
         '[[PromiseResult]]': value,
+        '[[PromiseId]]': { type: 'string', value: promiseId },
       },
       referenceCount: 1,
       createdAtStep: stepCounter,
-   capturedEnvironment: null,
-   }
- state.memoryHeap.push(promiseHeap)
-
-    return { type: 'object', value: 'Promise' }
-  }
-  
-  if (method === 'then') {
-    // CRITICAL FIX: Queue .then() callback as microtask
-  const callback = node.arguments[0]
-    
-  if (callback) {
-   const callbackName = callback.type === 'Identifier' ? callback.name : 'anonymous callback'
-      
-     // Get the resolved value from the promise this was called on
-   const lastPromise = state.promises[state.promises.length - 1]
-  //  const promiseValue = lastPromise?.status === 'fulfilled' ? lastPromise.value : { type: 'undefined', value: undefined }
-      
-     // Queue microtask with the callback
-    taskIdCounter++
-  const microtask: MicroTask = {
-      id: `microtask-${taskIdCounter}`,
-      type: 'promise-then',
-      callbackName,
-     promiseId: lastPromise?.id,
-   createdAtStep: stepCounter +1,
+      capturedEnvironment: null,
     }
-  state.microTaskQueue.push(microtask)
-      
-  steps.push(
-   createStep(
-    state,
-      node,
-      'async',
-      'enqueue-microtask',
-     `.then() handler "${callbackName}" queued as microtask`,
-     getNodeLine(node),
-     getNodeColumn(node)
-     )
-    )
-   }
-    
-    // Return a new promise for chaining (simplified)
-  heapIdCounter++
- const heapId = `heap-${heapIdCounter}`
- const newPromiseHeap: HeapObject = {
-     id: heapId,
-     type: 'object',
-    properties: {
-      '[[PromiseState]]': { type: 'string', value: 'pending' },
-      '[[PromiseResult]]': { type: 'undefined', value: undefined },
-    },
-   referenceCount: 1,
-  createdAtStep: stepCounter +1,
-   capturedEnvironment: null,
-   }
- state.memoryHeap.push(newPromiseHeap)
-    
-   return { type: 'object', value: 'Promise', heapId }
+    state.memoryHeap.push(promiseHeap)
+
+    return { type: 'object', value: 'Promise', heapId }
   }
 
- return { type: 'undefined', value: undefined }
+  if (method === 'then') {
+    const callbackNode = node.arguments[0]
+
+    // Get the actual promise state from our internal promises array
+    // by looking for the one that corresponds to this heap object
+    const heapObj = state.memoryHeap.find((h) => h.id === objValue?.heapId)
+    const originalPromiseId = heapObj?.properties['[[PromiseId]]']?.value as string
+    const promiseState = state.promises.find((p) => p.id === originalPromiseId)
+
+    // Return a new promise for chaining
+    taskIdCounter++
+    const newPromiseId = `promise-${taskIdCounter}`
+    const newPromise: PromiseState = {
+      id: newPromiseId,
+      label: `${promiseState?.label || 'Promise'}.then()`,
+      status: 'pending',
+      thenHandlers: [],
+      catchHandlers: [],
+      finallyHandlers: [],
+      createdAtStep: stepCounter + 1,
+    }
+    state.promises.push(newPromise)
+
+    if (callbackNode) {
+      const callbackValue = executeNode(callbackNode, state, steps, sourceCode)
+      const callbackName =
+        callbackNode.type === 'Identifier'
+          ? callbackNode.name
+          : callbackNode.type === 'ArrowFunctionExpression' ||
+              callbackNode.type === 'FunctionExpression'
+            ? 'anonymous'
+            : 'callback'
+
+      // Queue microtask
+      taskIdCounter++
+      const microtask: MicroTask = {
+        id: `microtask-${taskIdCounter}`,
+        type: 'promise-then',
+        callbackName,
+        promiseId: promiseState?.id,
+        newPromiseId, // Store the ID of the promise this handler will resolve
+        createdAtStep: stepCounter + 1,
+        callbackAst: callbackNode,
+        callbackValue,
+      }
+      state.microTaskQueue.push(microtask)
+
+      steps.push(
+        createStep(
+          state,
+          node,
+          'async',
+          'enqueue-microtask',
+          `.then() handler "${callbackName}" queued as microtask`,
+          getNodeLine(node),
+          getNodeColumn(node)
+        )
+      )
+    }
+
+    heapIdCounter++
+    const heapId = `heap-${heapIdCounter}`
+    const promiseHeap: HeapObject = {
+      id: heapId,
+      type: 'object',
+      properties: {
+        '[[PromiseState]]': { type: 'string', value: 'pending' } as RuntimeValue,
+        '[[PromiseResult]]': { type: 'undefined', value: undefined },
+        '[[PromiseId]]': { type: 'string', value: newPromiseId },
+      },
+      referenceCount: 1,
+      createdAtStep: stepCounter,
+      capturedEnvironment: null,
+    }
+    state.memoryHeap.push(promiseHeap)
+
+    return { type: 'object', value: 'Promise', heapId }
+  }
+
+  return { type: 'undefined', value: undefined }
+}
+
+function executeMemberAssignment(
+  node: AnyNode,
+  state: InterpreterState,
+  steps: ExecutionStep[],
+  sourceCode: string
+): RuntimeValue {
+  const obj = executeNode(node.left.object, state, steps, sourceCode)
+  const prop = node.left.computed
+    ? executeNode(node.left.property, state, steps, sourceCode)
+    : { type: 'string', value: node.left.property.name }
+  const value = executeNode(node.right, state, steps, sourceCode)
+
+  if (obj.heapId) {
+    const heapObj = state.memoryHeap.find((h) => h.id === obj.heapId)
+    if (heapObj) {
+      const key = String(prop.value)
+      if (heapObj.type === 'array' && heapObj.arrayElements) {
+        const index = parseInt(key, 10)
+        if (!isNaN(index) && index >= 0) {
+          heapObj.arrayElements[index] = value
+          // Update length if needed
+          if (index >= (heapObj.properties.length.value as number)) {
+            heapObj.properties.length = { type: 'number', value: index + 1 }
+          }
+        }
+      } else {
+        heapObj.properties[key] = value
+      }
+
+      steps.push(
+        createStep(
+          state,
+          node,
+          'execution',
+          'assign-variable',
+          `${formatValue(obj)}.${key} = ${formatValue(value)}`,
+          getNodeLine(node),
+          getNodeColumn(node)
+        )
+      )
+    }
+  }
+
+  return value
 }
 
 function executeAssignment(
@@ -1064,55 +1322,92 @@ function executeAssignment(
   _context: ExecutionContext
 ): RuntimeValue {
   const name = node.left?.name || 'unknown'
-  const value = executeNode(node.right, state, steps, '')
+  const rightValue = executeNode(node.right, state, steps, '')
+  let value = rightValue
+
+  // Handle +=, -=, etc.
+  if (node.operator !== '=') {
+    const current = resolveIdentifier(name, state)
+    const leftVal = current.value as any
+    const rightVal = rightValue.value as any
+
+    let result: any
+    switch (node.operator) {
+      case '+=':
+        result = leftVal + rightVal
+        break
+      case '-=':
+        result = leftVal - rightVal
+        break
+      case '*=':
+        result = leftVal * rightVal
+        break
+      case '/=':
+        result = leftVal / rightVal
+        break
+      default:
+        result = rightVal
+    }
+    value = createRuntimeValue(result)
+  }
 
   // Update in environment - search up closure chain through lexical environments
   const context = getCurrentContext(state)
- let found = false
+  let found = false
   if (context) {
     let currentEnv: EnvironmentRecord | null = context.lexicalEnvironment
-    
+
     while (currentEnv) {
       if (name in currentEnv.bindings) {
         currentEnv.bindings[name] = { ...value, initialized: true }
-       found = true
+        found = true
         break
       }
+
+      // If we are in an iteration environment, we want to update the binding in the loopEnv
+      // but only if it exists there. This allows 'i++' in a for loop to work correctly
+      // while still capturing the iteration's value for closures.
       currentEnv = currentEnv.outer
     }
   }
 
   // If not found in closure chain, it might be a new global variable (simplified)
   if (!found) {
-   const globalCtx = state.executionContexts.find((c) => c.type === 'global')
+    const globalCtx = state.executionContexts.find((c) => c.type === 'global')
     if (globalCtx) {
       globalCtx.lexicalEnvironment.bindings[name] = { ...value, initialized: true }
     }
   }
 
-  // Update memory slot - simplified, just update in current context
- const slot = state.memoryStack.find(
-    (s) => s.variableName === name && s.scopeId === state.currentContextId
-  )
-  if (slot) {
-    slot.value = value
-    slot.type = value.heapId ? 'reference' : 'primitive'
-    slot.heapReferenceId = value.heapId
+  // Update memory slot
+  let searchContextId: string | null = state.currentContextId
+  while (searchContextId) {
+    const slot = state.memoryStack.find(
+      (s) => s.variableName === name && s.scopeId === searchContextId
+    )
+    if (slot) {
+      slot.value = value
+      slot.type = value.heapId ? 'reference' : 'primitive'
+      slot.heapReferenceId = value.heapId
+      break
+    }
+    const ctx = state.executionContexts.find((c) => c.id === searchContextId)
+    searchContextId = ctx?.parentId || null
   }
 
   steps.push(
-  createStep(
-    state,
+    createStep(
+      state,
       node,
       'execution',
       'assign-variable',
-      `${name} = ${formatValue(value)}`,
+      `${name} ${node.operator} ${formatValue(rightValue)} → ${formatValue(value)}`,
       getNodeLine(node),
       getNodeColumn(node)
     )
   )
 
- return value
+  return value
 }
 
 function evaluateBinaryExpression(
@@ -1124,16 +1419,13 @@ function evaluateBinaryExpression(
   const left = executeNode(node.left, state, steps, sourceCode)
   const right = executeNode(node.right, state, steps, sourceCode)
 
-  const leftVal = left.value as number
-  const rightVal = right.value as number
+  const leftVal = left.value as any
+  const rightVal = right.value as any
 
   let result: unknown
   switch (node.operator) {
     case '+':
-      result =
-        typeof leftVal === 'string' || typeof rightVal === 'string'
-          ? String(leftVal) + String(rightVal)
-          : leftVal + rightVal
+      result = leftVal + rightVal
       break
     case '-':
       result = leftVal - rightVal
@@ -1175,7 +1467,21 @@ function evaluateBinaryExpression(
       result = undefined
   }
 
-  return createRuntimeValue(result)
+  const runtimeResult = createRuntimeValue(result)
+
+  steps.push(
+    createStep(
+      state,
+      node,
+      'expression-eval',
+      'expression-eval',
+      `${formatValue(left)} ${node.operator} ${formatValue(right)} → ${formatValue(runtimeResult)}`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
+
+  return runtimeResult
 }
 
 function evaluateLogicalExpression(
@@ -1226,47 +1532,43 @@ function evaluateUnaryExpression(
   }
 }
 
-function evaluateUpdateExpression(
-  node: AnyNode,
-  state: InterpreterState,
-  _context: ExecutionContext
-): RuntimeValue {
+function evaluateUpdateExpression(node: AnyNode, state: InterpreterState): RuntimeValue {
+  const context = getCurrentContext(state)
+  if (!context) return { type: 'undefined', value: undefined }
+
   const name = node.argument?.name
   if (!name) return { type: 'undefined', value: undefined }
 
   const current = resolveIdentifier(name, state)
-  const currentVal = current.value as number
-
-  let newVal: number
-  if (node.operator === '++') {
-    newVal = currentVal + 1
-  } else {
-    newVal = currentVal - 1
-  }
+  const currentVal = Number(current.value)
+  const newVal = node.operator === '++' ? currentVal + 1 : currentVal - 1
 
   // Update value - search up closure chain through lexical environments
-  const context = getCurrentContext(state)
-  if (context) {
-    let currentEnv: EnvironmentRecord | null = context.lexicalEnvironment
-    
-    while (currentEnv) {
-      if (name in currentEnv.bindings) {
-        currentEnv.bindings[name] = { type: 'number', value: newVal, initialized: true }
-        break
-      }
-      currentEnv = currentEnv.outer
+  let currentEnv: EnvironmentRecord | null = context.lexicalEnvironment
+
+  while (currentEnv) {
+    if (name in currentEnv.bindings) {
+      currentEnv.bindings[name] = { type: 'number', value: newVal, initialized: true }
+      break
     }
+    currentEnv = currentEnv.outer
   }
 
-  // Update memory stack slot - simplified
- const slot = state.memoryStack.find(
-    (s) => s.variableName === name && s.scopeId === state.currentContextId
-  )
-  if (slot) {
-    slot.value = { type: 'number', value: newVal }
+  // Update memory stack slot
+  let searchContextId: string | null = state.currentContextId
+  while (searchContextId) {
+    const slot = state.memoryStack.find(
+      (s) => s.variableName === name && s.scopeId === searchContextId
+    )
+    if (slot) {
+      slot.value = { type: 'number', value: newVal }
+      break
+    }
+    const ctx = state.executionContexts.find((c) => c.id === searchContextId)
+    searchContextId = ctx?.parentId || null
   }
 
- return node.prefix ? { type: 'number', value: newVal } : { type: 'number', value: currentVal }
+  return node.prefix ? { type: 'number', value: newVal } : { type: 'number', value: currentVal }
 }
 
 function resolveIdentifier(name: string, state: InterpreterState): RuntimeValue {
@@ -1275,26 +1577,40 @@ function resolveIdentifier(name: string, state: InterpreterState): RuntimeValue 
   if (!context) return { type: 'undefined', value: undefined }
 
   // Search from current lexical environment up through outer chain
-  let currentEnv = context.lexicalEnvironment
-  
+  let currentEnv: EnvironmentRecord | null = context.lexicalEnvironment
+
   while (currentEnv) {
     if (name in currentEnv.bindings) {
-    const binding = currentEnv.bindings[name]
-      
+      const binding = currentEnv.bindings[name]
+
       // Check TDZ - variable must be initialized
       if (binding.initialized === false) {
-      throw new ReferenceError(`Cannot access '${name}' before initialization`)
+        throw new ReferenceError(`Cannot access '${name}' before initialization`)
       }
-      
+
       return binding
     }
-    
+
     // Move to outer environment
-   currentEnv = currentEnv.outer!  // Non-null assertion - loop condition checks for null
+    currentEnv = currentEnv.outer
+  }
+
+  // Fallback: check variable environment
+  if (name in context.variableEnvironment.bindings) {
+    return context.variableEnvironment.bindings[name]
+  }
+
+  // Fallback: check Global context explicitly if not in chain
+  const globalCtx = state.executionContexts.find((c) => c.type === 'global')
+  if (globalCtx && name in globalCtx.lexicalEnvironment.bindings) {
+    return globalCtx.lexicalEnvironment.bindings[name]
+  }
+  if (globalCtx && name in globalCtx.variableEnvironment.bindings) {
+    return globalCtx.variableEnvironment.bindings[name]
   }
 
   // Not found in scope chain
- return { type: 'undefined', value: undefined }
+  return { type: 'undefined', value: undefined }
 }
 
 function evaluateMemberExpression(
@@ -1345,12 +1661,12 @@ function createObjectExpression(
   const heapObj: HeapObject = {
     id: heapId,
     type: 'object',
-   properties,
- referenceCount: 1,
-  createdAtStep: stepCounter +1,
-  capturedEnvironment: null, // Objects don't capture environment
- }
- state.memoryHeap.push(heapObj)
+    properties,
+    referenceCount: 1,
+    createdAtStep: stepCounter + 1,
+    capturedEnvironment: null, // Objects don't capture environment
+  }
+  state.memoryHeap.push(heapObj)
 
   steps.push(
     createStep(
@@ -1383,13 +1699,13 @@ function createArrayExpression(
   const heapObj: HeapObject = {
     id: heapId,
     type: 'array',
-   properties: { length: { type: 'number', value: elements.length } },
-   arrayElements: elements,
- referenceCount: 1,
-  createdAtStep: stepCounter +1,
-  capturedEnvironment: null, // Arrays don't capture environment
- }
- state.memoryHeap.push(heapObj)
+    properties: { length: { type: 'number', value: elements.length } },
+    arrayElements: elements,
+    referenceCount: 1,
+    createdAtStep: stepCounter + 1,
+    capturedEnvironment: null, // Arrays don't capture environment
+  }
+  state.memoryHeap.push(heapObj)
 
   steps.push(
     createStep(
@@ -1425,18 +1741,17 @@ function createFunctionExpression(
     functionParams: params,
     functionBody: 'function body',
     functionAst: node.body,
-   capturedEnvironment: null, // Will be set below - capture current lexical environment
+    capturedEnvironment: null, // Will be set below - capture current lexical environment
     referenceCount: 1,
-   createdAtStep: stepCounter + 1,
+    createdAtStep: stepCounter + 1,
   }
-  
-  // CRITICAL FIX: Capture the LEXICAL ENVIRONMENT where function is defined
-  // This is what makes closures work!
+
+  // Capture the LEXICAL ENVIRONMENT where function is defined
   const currentContext = getCurrentContext(state)
   if (currentContext) {
     heapObj.capturedEnvironment = currentContext.lexicalEnvironment
   }
-  
+
   state.memoryHeap.push(heapObj)
 
   steps.push(
@@ -1489,25 +1804,73 @@ function executeForStatement(
   steps: ExecutionStep[],
   sourceCode: string
 ): RuntimeValue {
+  const context = getCurrentContext(state)
+  if (!context) return { type: 'undefined', value: undefined }
+
+  // Create a block environment for the entire for loop
+  const outerEnv = context.lexicalEnvironment
+  envIdCounter++
+  const loopEnv: EnvironmentRecord = {
+    id: `env-loop-${envIdCounter}`,
+    type: 'block',
+    bindings: {},
+    outer: outerEnv,
+  }
+  context.lexicalEnvironment = loopEnv
+
   // Initialize
   if (node.init) {
     executeNode(node.init, state, steps, sourceCode)
   }
 
   let iterations = 0
-  const maxIterations = 100 // Safety limit
+  const maxIterations = DEFAULT_MAX_LOOP_ITERATIONS // Use constant
 
   while (iterations < maxIterations) {
-    // Test condition
+    // Create a new per-iteration environment
+    envIdCounter++
+    const iterationEnv: EnvironmentRecord = {
+      id: `env-iteration-${envIdCounter}`,
+      type: 'block',
+      bindings: { ...loopEnv.bindings }, // Snapshot current values
+      outer: loopEnv.outer,
+    }
+    context.lexicalEnvironment = iterationEnv
+
+    // Test condition (runs on iterationEnv)
     if (node.test) {
       const test = executeNode(node.test, state, steps, sourceCode)
       if (!test.value) break
     }
 
-    // Execute body
-    executeNode(node.body, state, steps, sourceCode)
+    // Execute body (runs on iterationEnv)
+    const result = executeNode(node.body, state, steps, sourceCode)
 
-    // Update
+    // After body, update loopEnv with current iteration values
+    Object.entries(iterationEnv.bindings).forEach(([name, val]) => {
+      if (name in loopEnv.bindings) {
+        loopEnv.bindings[name] = val
+      }
+    })
+
+    // Restore to loopEnv for update
+    context.lexicalEnvironment = loopEnv
+
+    if (result.isBreak) break
+    if (result.isContinue) {
+      // Run update before continuing for-loop
+      if (node.update) {
+        executeNode(node.update, state, steps, sourceCode)
+      }
+      iterations++
+      continue
+    }
+    if (result.isReturn || result.isAwait) {
+      context.lexicalEnvironment = outerEnv
+      return result
+    }
+
+    // Update (runs on loopEnv)
     if (node.update) {
       executeNode(node.update, state, steps, sourceCode)
     }
@@ -1515,7 +1878,278 @@ function executeForStatement(
     iterations++
   }
 
+  // Restore original environment
+  context.lexicalEnvironment = outerEnv
+
+  if (iterations >= maxIterations) {
+    throw new Error(`Infinite loop detected: exceeded ${maxIterations} iterations`)
+  }
+
   return { type: 'undefined', value: undefined }
+}
+
+function executeForOfStatement(
+  node: AnyNode,
+  state: InterpreterState,
+  steps: ExecutionStep[],
+  sourceCode: string
+): RuntimeValue {
+  const context = getCurrentContext(state)
+  if (!context) return { type: 'undefined', value: undefined }
+
+  const right = executeNode(node.right, state, steps, sourceCode)
+  let items: RuntimeValue[] = []
+
+  if (right.type === 'array' && right.heapId) {
+    const heapObj = state.memoryHeap.find((h) => h.id === right.heapId)
+    if (heapObj && heapObj.arrayElements) {
+      items = heapObj.arrayElements
+    }
+  } else if (right.type === 'string') {
+    items = String(right.value)
+      .split('')
+      .map((char) => ({ type: 'string', value: char }))
+  }
+
+  const outerEnv = context.lexicalEnvironment
+  let iterations = 0
+  const maxIterations = DEFAULT_MAX_LOOP_ITERATIONS
+
+  for (const item of items) {
+    if (iterations >= maxIterations) break
+
+    // Create a new block environment for each iteration
+    envIdCounter++
+    const iterationEnv: EnvironmentRecord = {
+      id: `env-iteration-${envIdCounter}`,
+      type: 'block',
+      bindings: {},
+      outer: outerEnv,
+    }
+    context.lexicalEnvironment = iterationEnv
+
+    // Handle left side (e.g., let x of items)
+    if (node.left.type === 'VariableDeclaration') {
+      const decl = node.left.declarations[0]
+      const name = decl.id.name
+      iterationEnv.bindings[name] = { ...item, initialized: true }
+
+      state.memoryStack.push({
+        id: generateId('mem'),
+        variableName: name,
+        scopeId: context.id,
+        type: item.heapId ? 'reference' : 'primitive',
+        value: item,
+        heapReferenceId: item.heapId,
+      })
+    } else if (node.left.type === 'Identifier') {
+      const name = node.left.name
+      // Update existing variable (though for-of usually uses let/const)
+      let currentEnv: EnvironmentRecord | null = iterationEnv
+      let found = false
+      while (currentEnv) {
+        if (name in currentEnv.bindings) {
+          currentEnv.bindings[name] = { ...item, initialized: true }
+          found = true
+          break
+        }
+        currentEnv = currentEnv.outer
+      }
+      if (!found) {
+        iterationEnv.bindings[name] = { ...item, initialized: true }
+      }
+    }
+
+    // Execute body
+    const result = executeNode(node.body, state, steps, sourceCode)
+    if (result.isBreak) {
+      context.lexicalEnvironment = outerEnv
+      break
+    }
+    if (result.isContinue) {
+      context.lexicalEnvironment = outerEnv
+      iterations++
+      continue
+    }
+    if (result.isReturn || result.isAwait) {
+      context.lexicalEnvironment = outerEnv
+      return result
+    }
+
+    iterations++
+  }
+
+  context.lexicalEnvironment = outerEnv
+  if (iterations >= maxIterations) {
+    throw new Error(`Infinite loop detected: exceeded ${maxIterations} iterations`)
+  }
+
+  return { type: 'undefined', value: undefined }
+}
+
+function executeForInStatement(
+  node: AnyNode,
+  state: InterpreterState,
+  steps: ExecutionStep[],
+  sourceCode: string
+): RuntimeValue {
+  const context = getCurrentContext(state)
+  if (!context) return { type: 'undefined', value: undefined }
+
+  const right = executeNode(node.right, state, steps, sourceCode)
+  let keys: string[] = []
+
+  if (right.heapId) {
+    const heapObj = state.memoryHeap.find((h) => h.id === right.heapId)
+    if (heapObj) {
+      keys = Object.keys(heapObj.properties)
+    }
+  }
+
+  const outerEnv = context.lexicalEnvironment
+  let iterations = 0
+  const maxIterations = DEFAULT_MAX_LOOP_ITERATIONS
+
+  for (const key of keys) {
+    if (iterations >= maxIterations) break
+
+    // Create a new block environment for each iteration
+    envIdCounter++
+    const iterationEnv: EnvironmentRecord = {
+      id: `env-iteration-${envIdCounter}`,
+      type: 'block',
+      bindings: {},
+      outer: outerEnv,
+    }
+    context.lexicalEnvironment = iterationEnv
+
+    const keyValue: RuntimeValue = { type: 'string', value: key }
+
+    // Handle left side
+    if (node.left.type === 'VariableDeclaration') {
+      const decl = node.left.declarations[0]
+      const name = decl.id.name
+      iterationEnv.bindings[name] = { ...keyValue, initialized: true }
+
+      state.memoryStack.push({
+        id: generateId('mem'),
+        variableName: name,
+        scopeId: context.id,
+        type: 'primitive',
+        value: keyValue,
+      })
+    } else if (node.left.type === 'Identifier') {
+      const name = node.left.name
+      iterationEnv.bindings[name] = { ...keyValue, initialized: true }
+    }
+
+    // Execute body
+    const result = executeNode(node.body, state, steps, sourceCode)
+    if (result.isBreak) {
+      context.lexicalEnvironment = outerEnv
+      break
+    }
+    if (result.isContinue) {
+      context.lexicalEnvironment = outerEnv
+      iterations++
+      continue
+    }
+    if (result.isReturn || result.isAwait) {
+      context.lexicalEnvironment = outerEnv
+      return result
+    }
+
+    iterations++
+  }
+
+  context.lexicalEnvironment = outerEnv
+  if (iterations >= maxIterations) {
+    throw new Error(`Infinite loop detected: exceeded ${maxIterations} iterations`)
+  }
+
+  return { type: 'undefined', value: undefined }
+}
+
+function executeSwitchStatement(
+  node: AnyNode,
+  state: InterpreterState,
+  steps: ExecutionStep[],
+  sourceCode: string
+): RuntimeValue {
+  const discriminant = executeNode(node.discriminant, state, steps, sourceCode)
+  let matched = false
+  let defaultCase: any = null
+
+  for (const caseNode of node.cases) {
+    if (caseNode.test) {
+      const testValue = executeNode(caseNode.test, state, steps, sourceCode)
+      if (testValue.value === discriminant.value || matched) {
+        matched = true
+        for (const stmt of caseNode.consequent) {
+          const result = executeNode(stmt, state, steps, sourceCode)
+          if (result.isBreak) return { type: 'undefined', value: undefined }
+          if (result.isReturn || result.isAwait) return result
+        }
+      }
+    } else {
+      defaultCase = caseNode
+    }
+  }
+
+  if (!matched && defaultCase) {
+    for (const stmt of defaultCase.consequent) {
+      const result = executeNode(stmt, state, steps, sourceCode)
+      if (result.isBreak) return { type: 'undefined', value: undefined }
+      if (result.isReturn || result.isAwait) return result
+    }
+  }
+
+  return { type: 'undefined', value: undefined }
+}
+
+function executeTryStatement(
+  node: AnyNode,
+  state: InterpreterState,
+  steps: ExecutionStep[],
+  sourceCode: string
+): RuntimeValue {
+  try {
+    return executeNode(node.block, state, steps, sourceCode)
+  } catch (error) {
+    if (node.handler) {
+      // Create a block environment for catch
+      const context = getCurrentContext(state)
+      if (context) {
+        const outerEnv = context.lexicalEnvironment
+        envIdCounter++
+        const catchEnv: EnvironmentRecord = {
+          id: `env-catch-${envIdCounter}`,
+          type: 'block',
+          bindings: {},
+          outer: outerEnv,
+        }
+        context.lexicalEnvironment = catchEnv
+
+        // Bind error to catch variable
+        if (node.handler.param) {
+          catchEnv.bindings[node.handler.param.name] = {
+            type: 'string',
+            value: error instanceof Error ? error.message : String(error),
+            initialized: true,
+          }
+        }
+
+        const result = executeNode(node.handler.body, state, steps, sourceCode)
+        context.lexicalEnvironment = outerEnv
+        return result
+      }
+    }
+    throw error // Rethrow if no catch
+  } finally {
+    if (node.finalizer) {
+      executeNode(node.finalizer, state, steps, sourceCode)
+    }
+  }
 }
 
 function executeWhileStatement(
@@ -1524,18 +2158,56 @@ function executeWhileStatement(
   steps: ExecutionStep[],
   sourceCode: string
 ): RuntimeValue {
+  const context = getCurrentContext(state)
+  if (!context) return { type: 'undefined', value: undefined }
+
   let iterations = 0
-  const maxIterations = 100
+  const maxIterations = DEFAULT_MAX_LOOP_ITERATIONS
 
   while (iterations < maxIterations) {
     const test = executeNode(node.test, state, steps, sourceCode)
     if (!test.value) break
 
-    executeNode(node.body, state, steps, sourceCode)
+    const result = executeNode(node.body, state, steps, sourceCode)
+    if (result.isBreak) break
+    if (result.isContinue) {
+      iterations++
+      continue
+    }
+    if (result.isReturn || result.isAwait) return result
+
     iterations++
   }
 
+  if (iterations >= maxIterations) {
+    throw new Error(`Infinite loop detected: exceeded ${maxIterations} iterations`)
+  }
+
   return { type: 'undefined', value: undefined }
+}
+
+function executeAwaitExpression(
+  node: AnyNode,
+  state: InterpreterState,
+  steps: ExecutionStep[],
+  sourceCode: string
+): RuntimeValue {
+  const value = executeNode(node.argument, state, steps, sourceCode)
+
+  // This is a simplified simulation of await.
+  steps.push(
+    createStep(
+      state,
+      node,
+      'async',
+      'enqueue-microtask',
+      `awaiting promise... function will continue as microtask`,
+      getNodeLine(node),
+      getNodeColumn(node)
+    )
+  )
+
+  return { ...value, isAwait: true }
 }
 
 function executeNewExpression(
@@ -1552,17 +2224,17 @@ function executeNewExpression(
 
   // Generic object creation
   heapIdCounter++
- const heapId = `heap-${heapIdCounter}`
+  const heapId = `heap-${heapIdCounter}`
 
- const heapObj: HeapObject = {
+  const heapObj: HeapObject = {
     id: heapId,
     type: 'object',
-   properties: {},
- referenceCount: 1,
-  createdAtStep: stepCounter +1,
-  capturedEnvironment: null,
- }
- state.memoryHeap.push(heapObj)
+    properties: {},
+    referenceCount: 1,
+    createdAtStep: stepCounter + 1,
+    capturedEnvironment: null,
+  }
+  state.memoryHeap.push(heapObj)
 
   steps.push(
     createStep(
@@ -1603,6 +2275,8 @@ function processEventLoop(state: InterpreterState, steps: ExecutionStep[]): void
           callbackName: webApi.callbackName,
           webApiTaskId: webApi.id,
           createdAtStep: stepCounter + 1,
+          callbackAst: webApi.callbackAst,
+          callbackValue: webApi.callbackValue, // PASS THE VALUE!
         }
         state.taskQueue.push(macroTask)
 
@@ -1622,54 +2296,121 @@ function processEventLoop(state: InterpreterState, steps: ExecutionStep[]): void
     }
 
     // Process all microtasks first (CRITICAL: before macrotasks!)
-  state.eventLoopPhase = 'checking-microtasks'
-  while (state.microTaskQueue.length > 0) {
-  const microtask = state.microTaskQueue.shift()!
-  state.eventLoopPhase = 'executing-microtask'
+    state.eventLoopPhase = 'checking-microtasks'
+    while (state.microTaskQueue.length > 0) {
+      const microtask = state.microTaskQueue.shift()!
+      state.eventLoopPhase = 'executing-microtask'
 
-  steps.push(
-  createStep(
-    state,
-       null,
-       'async',
-       'dequeue-microtask',
-      `Executing microtask: ${microtask.callbackName}`,
-       1,
-       0
-     )
-   )
-    
-    // Execute promise.then() callback if we have the promise value
-  if (microtask.type === 'promise-then' && microtask.promiseId) {
-  const promise = state.promises.find(p => p.id === microtask.promiseId)
-  if (promise && promise.status === 'fulfilled' && promise.value) {
-      // Simulate callback execution with promise result
-  steps.push(
-    createStep(
-      state,
-         null,
-         'async',
-         'call-function',
-        `${microtask.callbackName}(${formatValue(promise.value)})`,
-        1,
-         0
-       )
-     )
-      
-      // Log the result if it's a callback that would log (simplified simulation)
-  if (microtask.callbackName.includes('onFulfilled') || microtask.callbackName.includes('log')) {
-     const entry: ConsoleEntry = {
-         id: generateId('console'),
-        type: 'log',
-        args: [promise.value],
-        timestamp: Date.now(),
-     stepNumber: stepCounter +1,
-       }
-    state.consoleOutput.push(entry)
+      steps.push(
+        createStep(
+          state,
+          null,
+          'async',
+          'dequeue-microtask',
+          `Executing microtask: ${microtask.callbackName}`,
+          1,
+          0
+        )
+      )
+
+      // Execute callback properly using the new helper
+      if (microtask.isContinuation && microtask.remainingStatements && microtask.contextToResume) {
+        // Resume async function continuation
+        const prevContextId = state.currentContextId
+        state.currentContextId = microtask.contextToResume
+
+        steps.push(
+          createStep(
+            state,
+            null,
+            'async',
+            'call-function',
+            `Resuming async function continuation`,
+            1,
+            0
+          )
+        )
+
+        for (const stmt of microtask.remainingStatements) {
+          const result = executeNode(stmt, state, steps, '')
+          if (result.isAwait || result.isReturn) break
+        }
+
+        state.currentContextId = prevContextId
+      } else if (microtask.callbackValue) {
+        let args: RuntimeValue[] = []
+
+        // If it's a promise .then() or similar, pass the result as argument
+        if (microtask.type === 'promise-then' && microtask.promiseId) {
+          const promise = state.promises.find((p) => p.id === microtask.promiseId)
+          if (promise && promise.status === 'fulfilled' && promise.value) {
+            args = [promise.value]
+          }
+        }
+
+        const result = executeFunction(
+          microtask.callbackValue,
+          microtask.callbackName,
+          args,
+          state,
+          steps,
+          microtask.callbackAst,
+          ''
+        )
+
+        // Resolve the new promise with the callback result
+        if (microtask.newPromiseId) {
+          const newPromise = state.promises.find((p) => p.id === microtask.newPromiseId)
+          if (newPromise) {
+            newPromise.status = 'fulfilled'
+            newPromise.value = result
+            newPromise.resolvedAtStep = stepCounter
+
+            // Also update the heap object for this promise
+            const heapObj = state.memoryHeap.find(
+              (h) => h.properties['[[PromiseId]]']?.value === microtask.newPromiseId
+            )
+            if (heapObj) {
+              heapObj.properties['[[PromiseState]]'] = { type: 'string', value: 'fulfilled' }
+              heapObj.properties['[[PromiseResult]]'] = result
+            }
+
+            steps.push(
+              createStep(
+                state,
+                null,
+                'async',
+                'resolve-promise',
+                `Promise resolved with ${formatValue(result)}`,
+                1,
+                0
+              )
+            )
+          }
+        }
+      } else if (microtask.callbackAst) {
+        const funcValue = executeNode(microtask.callbackAst, state, steps, '')
+        let args: RuntimeValue[] = []
+
+        // If it's a promise .then() or similar, pass the result as argument
+        if (microtask.type === 'promise-then' && microtask.promiseId) {
+          const promise = state.promises.find((p) => p.id === microtask.promiseId)
+          if (promise && promise.status === 'fulfilled' && promise.value) {
+            args = [promise.value]
+          }
+        }
+
+        executeFunction(
+          funcValue,
+          microtask.callbackName,
+          args,
+          state,
+          steps,
+          microtask.callbackAst,
+          ''
+        )
       }
     }
-   }
-  }
 
     // Process one macrotask
     if (state.taskQueue.length > 0) {
@@ -1692,6 +2433,30 @@ function processEventLoop(state: InterpreterState, steps: ExecutionStep[]): void
       const webApi = state.webApis.find((w) => w.id === macrotask.webApiTaskId)
       if (webApi) {
         webApi.status = 'completed'
+      }
+
+      // Execute the callback properly using the new helper
+      if (macrotask.callbackValue) {
+        executeFunction(
+          macrotask.callbackValue,
+          macrotask.callbackName,
+          [],
+          state,
+          steps,
+          macrotask.callbackAst,
+          ''
+        )
+      } else if (macrotask.callbackAst) {
+        const funcValue = executeNode(macrotask.callbackAst, state, steps, '')
+        executeFunction(
+          funcValue,
+          macrotask.callbackName,
+          [],
+          state,
+          steps,
+          macrotask.callbackAst,
+          ''
+        )
       }
     }
 

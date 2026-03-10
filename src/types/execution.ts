@@ -8,7 +8,7 @@ export type EventLoopPhase =
   | 'checking-macrotasks'
   | 'executing-macrotask'
 
-export type ExecutionPhase = 'creation' | 'execution' | 'async'
+export type ExecutionPhase = 'creation' | 'execution' | 'async' | 'expression-eval'
 
 export type PromiseStatus = 'pending' | 'fulfilled' | 'rejected'
 
@@ -36,6 +36,7 @@ export type ExecutionAction =
   | 'pop-context'
   | 'hoisting'
   | 'expression-eval'
+  | 'call-webapi'
 
 export interface StackFrame {
   id: string
@@ -80,6 +81,9 @@ export interface RuntimeValue {
   heapId?: string
   label?: string
   isReturn?: boolean // New property to signal return from function
+  isAwait?: boolean // New property to signal await suspension
+  isBreak?: boolean // New property to signal break from loop/switch
+  isContinue?: boolean // New property to signal continue to next iteration
 }
 
 export interface MemorySlot {
@@ -115,22 +119,33 @@ export interface WebApiTask {
   remainingTime: number
   status: 'pending' | 'ready' | 'completed'
   createdAtStep: number
+  callbackAst?: any // Store the AST for callback execution
+  callbackValue?: RuntimeValue // Store the actual function value
 }
 
 export interface MicroTask {
   id: string
   type: 'promise-then' | 'promise-catch' | 'promise-finally' | 'queueMicrotask'
   callbackName: string
-  promiseId?: string
+  promiseId?: string // The ID of the promise this handler is attached to
+  newPromiseId?: string // The ID of the new promise returned by .then()
   createdAtStep: number
+  callbackAst?: any // Store the AST for callback execution
+  callbackValue?: RuntimeValue // Store the actual function value
+  // For async/await continuation
+  isContinuation?: boolean
+  remainingStatements?: any[]
+  contextToResume?: string // Context ID
 }
 
 export interface MacroTask {
   id: string
-  type: 'setTimeout' | 'setInterval' | 'setImmediate' | 'I/O'
+  type: 'setTimeout' | 'setInterval' | 'setImmediate' | 'message-channel'
   callbackName: string
   webApiTaskId?: string
   createdAtStep: number
+  callbackAst?: any // Store the AST for callback execution
+  callbackValue?: RuntimeValue // Store the actual function value
 }
 
 export interface PromiseState {
